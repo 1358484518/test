@@ -71,6 +71,49 @@ static void MX_USART1_UART_Init(void);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+static void CPU_DelayMs(uint32_t ms)
+{
+  uint32_t count = (SystemCoreClock / 4000U) * ms;
+
+  while (count-- > 0U)
+  {
+    __NOP();
+  }
+}
+
+static void USART1_HardwareInit(void)
+{
+  GPIO_InitTypeDef gpio = {0};
+  RCC_PeriphCLKInitTypeDef clk = {0};
+
+  SystemCoreClockUpdate();
+
+  clk.PeriphClockSelection = RCC_PERIPHCLK_USART1;
+  clk.Usart1ClockSelection = RCC_USART1CLKSOURCE_PCLK2;
+  if (HAL_RCCEx_PeriphCLKConfig(&clk) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  __HAL_RCC_USART1_FORCE_RESET();
+  __HAL_RCC_USART1_RELEASE_RESET();
+  __HAL_RCC_USART1_CLK_ENABLE();
+  __HAL_RCC_GPIOA_CLK_ENABLE();
+
+  /* Only TX uses alternate function. Floating PA10 stays GPIO input pull-up. */
+  gpio.Pin = GPIO_PIN_9;
+  gpio.Mode = GPIO_MODE_AF_PP;
+  gpio.Pull = GPIO_NOPULL;
+  gpio.Speed = GPIO_SPEED_FREQ_LOW;
+  gpio.Alternate = GPIO_AF7_USART1;
+  HAL_GPIO_Init(GPIOA, &gpio);
+
+  gpio.Pin = GPIO_PIN_10;
+  gpio.Mode = GPIO_MODE_INPUT;
+  gpio.Pull = GPIO_PULLUP;
+  HAL_GPIO_Init(GPIOA, &gpio);
+}
+
 static void USART1_CaptureDiag(uint32_t stage)
 {
   usart_dbg.stage = stage;
@@ -85,11 +128,10 @@ static void USART1_CaptureDiag(uint32_t stage)
 
 static int USART1_BringUp(void)
 {
-  uint32_t tickstart;
-
   huart1.Instance = USART1;
   huart1.gState = HAL_UART_STATE_RESET;
-  HAL_UART_MspInit(&huart1);
+
+  USART1_HardwareInit();
   USART1_CaptureDiag(1U);
 
   if (usart_dbg.pclk2 == 0U)
@@ -101,19 +143,13 @@ static int USART1_BringUp(void)
   USART1->CR2 = 0U;
   USART1->CR3 = 0U;
   USART1->PRESC = 0U;
+  USART1->ICR = 0xFFFFFFFFU;
   USART1->BRR = (uint16_t)UART_DIV_SAMPLING16(usart_dbg.pclk2, 115200U, UART_PRESCALER_DIV1);
-  USART1->CR1 = USART_CR1_TE | USART_CR1_UE;
-  USART1_CaptureDiag(2U);
 
-  tickstart = HAL_GetTick();
-  while ((USART1->ISR & USART_ISR_TEACK) == 0U)
-  {
-    if ((HAL_GetTick() - tickstart) > 100U)
-    {
-      USART1_CaptureDiag(3U);
-      return -2;
-    }
-  }
+  /* TX only: do not enable RE on a floating/unconnected RX pin. */
+  USART1->CR1 = USART_CR1_UE | USART_CR1_TE;
+  CPU_DelayMs(1U);
+  USART1_CaptureDiag(4U);
 
   huart1.gState = HAL_UART_STATE_READY;
   huart1.RxState = HAL_UART_STATE_READY;
@@ -127,21 +163,22 @@ static int USART1_BringUp(void)
   huart1.Init.OverSampling = UART_OVERSAMPLING_16;
   huart1.Init.OneBitSampling = UART_ONE_BIT_SAMPLE_DISABLE;
   huart1.Init.ClockPrescaler = UART_PRESCALER_DIV1;
-  USART1_CaptureDiag(4U);
   return 0;
 }
 
 static void USART1_SendByte(uint8_t byte)
 {
-  uint32_t tickstart = HAL_GetTick();
+  volatile uint32_t timeout = SystemCoreClock / 100U;
 
-  while ((USART1->ISR & USART_ISR_TXE_TXFNF) == 0U)
+  while (((USART1->ISR & USART_ISR_TXE_TXFNF) == 0U) && (timeout > 0U))
   {
-    if ((HAL_GetTick() - tickstart) > 100U)
-    {
-      USART1_CaptureDiag(5U);
-      return;
-    }
+    timeout--;
+  }
+
+  if (timeout == 0U)
+  {
+    USART1_CaptureDiag(5U);
+    return;
   }
 
   USART1->TDR = byte;
@@ -206,7 +243,7 @@ int main(void)
 
     /* USER CODE BEGIN 3 */
     USART1_SendString("hello\r\n");
-    HAL_Delay(500);
+    CPU_DelayMs(500U);
   }
   /* USER CODE END 3 */
 }
