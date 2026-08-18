@@ -1,0 +1,3 @@
+D:/1/usart1/Core/Src/stm32h5xx_hal_msp.c:62:6:HAL_MspInit	1
+D:/1/usart1/Core/Src/stm32h5xx_hal_msp.c:82:6:HAL_UART_MspInit	3
+D:/1/usart1/Core/Src/stm32h5xx_hal_msp.c:130:6:HAL_UART_MspDeInit	2
