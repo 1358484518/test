@@ -55,9 +55,8 @@ static void MX_ICACHE_Init(void);
 static void MX_USART1_UART_Init(void);
 /* USER CODE BEGIN PFP */
 void USART1_Init(void);
-void USART1_SendByte(uint8_t data);
-void USART1_SendData(const uint8_t *data, uint16_t len);
-void USART1_SendString(const char *str);
+HAL_StatusTypeDef HAL_USART1_Transmit(const uint8_t *data, uint16_t len, uint32_t timeout);
+HAL_StatusTypeDef HAL_USART1_SendString(const char *str);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -112,52 +111,49 @@ void USART1_Init(void)
   USART1->ICR = 0xFFFFFFFFU;
   USART1->BRR = (uint16_t)UART_DIV_SAMPLING16(pclk2, 115200U, UART_PRESCALER_DIV1);
   USART1->CR1 = USART_CR1_UE | USART_CR1_TE;
+
+  /* Sync HAL handle after register init. Skip HAL_UART_Init() TEACK wait. */
+  huart1.Instance = USART1;
+  huart1.Init.BaudRate = 115200U;
+  huart1.Init.WordLength = UART_WORDLENGTH_8B;
+  huart1.Init.StopBits = UART_STOPBITS_1;
+  huart1.Init.Parity = UART_PARITY_NONE;
+  huart1.Init.Mode = UART_MODE_TX;
+  huart1.Init.HwFlowCtl = UART_HWCONTROL_NONE;
+  huart1.Init.OverSampling = UART_OVERSAMPLING_16;
+  huart1.Init.OneBitSampling = UART_ONE_BIT_SAMPLE_DISABLE;
+  huart1.Init.ClockPrescaler = UART_PRESCALER_DIV1;
+  huart1.gState = HAL_UART_STATE_READY;
+  huart1.RxState = HAL_UART_STATE_READY;
+  huart1.Lock = HAL_UNLOCKED;
+  huart1.ErrorCode = HAL_UART_ERROR_NONE;
 }
 
-void USART1_SendByte(uint8_t data)
+HAL_StatusTypeDef HAL_USART1_Transmit(const uint8_t *data, uint16_t len, uint32_t timeout)
 {
-  while ((USART1->ISR & USART_ISR_TXE_TXFNF) == 0U)
-  {
-  }
-
-  USART1->TDR = data;
-}
-
-void USART1_SendData(const uint8_t *data, uint16_t len)
-{
-  uint16_t i;
-
   if ((data == NULL) || (len == 0U))
   {
-    return;
+    return HAL_ERROR;
   }
 
-  for (i = 0U; i < len; i++)
-  {
-    USART1_SendByte(data[i]);
-  }
-
-  while ((USART1->ISR & USART_ISR_TC) == 0U)
-  {
-  }
+  return HAL_UART_Transmit(&huart1, data, len, timeout);
 }
 
-void USART1_SendString(const char *str)
+HAL_StatusTypeDef HAL_USART1_SendString(const char *str)
 {
+  uint16_t len = 0U;
+
   if (str == NULL)
   {
-    return;
+    return HAL_ERROR;
   }
 
-  while (*str != '\0')
+  while (str[len] != '\0')
   {
-    USART1_SendByte((uint8_t)*str);
-    str++;
+    len++;
   }
 
-  while ((USART1->ISR & USART_ISR_TC) == 0U)
-  {
-  }
+  return HAL_USART1_Transmit((const uint8_t *)str, len, 1000U);
 }
 /* USER CODE END 0 */
 
@@ -196,7 +192,10 @@ int main(void)
   MX_ICACHE_Init();
   /* USER CODE BEGIN 2 */
   USART1_Init();
-  USART1_SendString("USART1 ready\r\n");
+  if (HAL_USART1_SendString("USART1 ready\r\n") != HAL_OK)
+  {
+    Error_Handler();
+  }
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -206,7 +205,10 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-    USART1_SendString("hello\r\n");
+    if (HAL_USART1_SendString("hello\r\n") != HAL_OK)
+    {
+      Error_Handler();
+    }
     CPU_DelayMs(500U);
   }
   /* USER CODE END 3 */
