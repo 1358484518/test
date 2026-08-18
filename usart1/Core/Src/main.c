@@ -44,7 +44,19 @@
 UART_HandleTypeDef huart1;
 
 /* USER CODE BEGIN PV */
+typedef struct
+{
+  uint32_t stage;
+  uint32_t pclk2;
+  uint32_t rcc_apb2enr;
+  uint32_t rcc_ccipr1;
+  uint32_t cr1;
+  uint32_t brr;
+  uint32_t isr;
+  uint32_t hal_tick;
+} UartDiag_t;
 
+volatile UartDiag_t usart_dbg;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -59,7 +71,90 @@ static void MX_USART1_UART_Init(void);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+static void USART1_CaptureDiag(uint32_t stage)
+{
+  usart_dbg.stage = stage;
+  usart_dbg.pclk2 = HAL_RCC_GetPCLK2Freq();
+  usart_dbg.rcc_apb2enr = RCC->APB2ENR;
+  usart_dbg.rcc_ccipr1 = RCC->CCIPR1;
+  usart_dbg.cr1 = USART1->CR1;
+  usart_dbg.brr = USART1->BRR;
+  usart_dbg.isr = USART1->ISR;
+  usart_dbg.hal_tick = HAL_GetTick();
+}
 
+static int USART1_BringUp(void)
+{
+  uint32_t tickstart;
+
+  huart1.Instance = USART1;
+  huart1.gState = HAL_UART_STATE_RESET;
+  HAL_UART_MspInit(&huart1);
+  USART1_CaptureDiag(1U);
+
+  if (usart_dbg.pclk2 == 0U)
+  {
+    return -1;
+  }
+
+  USART1->CR1 = 0U;
+  USART1->CR2 = 0U;
+  USART1->CR3 = 0U;
+  USART1->PRESC = 0U;
+  USART1->BRR = (uint16_t)UART_DIV_SAMPLING16(usart_dbg.pclk2, 115200U, UART_PRESCALER_DIV1);
+  USART1->CR1 = USART_CR1_TE | USART_CR1_UE;
+  USART1_CaptureDiag(2U);
+
+  tickstart = HAL_GetTick();
+  while ((USART1->ISR & USART_ISR_TEACK) == 0U)
+  {
+    if ((HAL_GetTick() - tickstart) > 100U)
+    {
+      USART1_CaptureDiag(3U);
+      return -2;
+    }
+  }
+
+  huart1.gState = HAL_UART_STATE_READY;
+  huart1.RxState = HAL_UART_STATE_READY;
+  huart1.Lock = HAL_UNLOCKED;
+  huart1.Init.BaudRate = 115200U;
+  huart1.Init.WordLength = UART_WORDLENGTH_8B;
+  huart1.Init.StopBits = UART_STOPBITS_1;
+  huart1.Init.Parity = UART_PARITY_NONE;
+  huart1.Init.Mode = UART_MODE_TX;
+  huart1.Init.HwFlowCtl = UART_HWCONTROL_NONE;
+  huart1.Init.OverSampling = UART_OVERSAMPLING_16;
+  huart1.Init.OneBitSampling = UART_ONE_BIT_SAMPLE_DISABLE;
+  huart1.Init.ClockPrescaler = UART_PRESCALER_DIV1;
+  USART1_CaptureDiag(4U);
+  return 0;
+}
+
+static void USART1_SendByte(uint8_t byte)
+{
+  uint32_t tickstart = HAL_GetTick();
+
+  while ((USART1->ISR & USART_ISR_TXE_TXFNF) == 0U)
+  {
+    if ((HAL_GetTick() - tickstart) > 100U)
+    {
+      USART1_CaptureDiag(5U);
+      return;
+    }
+  }
+
+  USART1->TDR = byte;
+}
+
+static void USART1_SendString(const char *str)
+{
+  while (*str != '\0')
+  {
+    USART1_SendByte((uint8_t)*str);
+    str++;
+  }
+}
 /* USER CODE END 0 */
 
 /**
@@ -95,9 +190,12 @@ int main(void)
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
   MX_ICACHE_Init();
-  MX_USART1_UART_Init();
+  if (USART1_BringUp() != 0)
+  {
+    Error_Handler();
+  }
   /* USER CODE BEGIN 2 */
-
+  USART1_SendString("USART1 ready\r\n");
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -107,6 +205,8 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
+    USART1_SendString("hello\r\n");
+    HAL_Delay(500);
   }
   /* USER CODE END 3 */
 }
@@ -220,16 +320,13 @@ static void MX_USART1_UART_Init(void)
   huart1.Init.WordLength = UART_WORDLENGTH_8B;
   huart1.Init.StopBits = UART_STOPBITS_1;
   huart1.Init.Parity = UART_PARITY_NONE;
-  huart1.Init.Mode = UART_MODE_TX_RX;
+  huart1.Init.Mode = UART_MODE_TX;
   huart1.Init.HwFlowCtl = UART_HWCONTROL_NONE;
   huart1.Init.OverSampling = UART_OVERSAMPLING_16;
   huart1.Init.OneBitSampling = UART_ONE_BIT_SAMPLE_DISABLE;
   huart1.Init.ClockPrescaler = UART_PRESCALER_DIV1;
   huart1.AdvancedInit.AdvFeatureInit = UART_ADVFEATURE_NO_INIT;
-  if (HAL_UART_Init(&huart1) != HAL_OK)
-  {
-    Error_Handler();
-  }
+  /* HAL_UART_Init() is replaced by USART1_BringUp() in main() */
   /* USER CODE BEGIN USART1_Init 2 */
 
   /* USER CODE END USART1_Init 2 */
