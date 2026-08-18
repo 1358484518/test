@@ -44,19 +44,7 @@
 UART_HandleTypeDef huart1;
 
 /* USER CODE BEGIN PV */
-typedef struct
-{
-  uint32_t stage;
-  uint32_t pclk2;
-  uint32_t rcc_apb2enr;
-  uint32_t rcc_ccipr1;
-  uint32_t cr1;
-  uint32_t brr;
-  uint32_t isr;
-  uint32_t hal_tick;
-} UartDiag_t;
 
-volatile UartDiag_t usart_dbg;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -66,7 +54,10 @@ static void MX_GPIO_Init(void);
 static void MX_ICACHE_Init(void);
 static void MX_USART1_UART_Init(void);
 /* USER CODE BEGIN PFP */
-
+void USART1_Init(void);
+void USART1_SendByte(uint8_t data);
+void USART1_SendData(const uint8_t *data, uint16_t len);
+void USART1_SendString(const char *str);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -81,10 +72,11 @@ static void CPU_DelayMs(uint32_t ms)
   }
 }
 
-static void USART1_HardwareInit(void)
+void USART1_Init(void)
 {
   GPIO_InitTypeDef gpio = {0};
   RCC_PeriphCLKInitTypeDef clk = {0};
+  uint32_t pclk2;
 
   SystemCoreClockUpdate();
 
@@ -100,7 +92,6 @@ static void USART1_HardwareInit(void)
   __HAL_RCC_USART1_CLK_ENABLE();
   __HAL_RCC_GPIOA_CLK_ENABLE();
 
-  /* Only TX uses alternate function. Floating PA10 stays GPIO input pull-up. */
   gpio.Pin = GPIO_PIN_9;
   gpio.Mode = GPIO_MODE_AF_PP;
   gpio.Pull = GPIO_NOPULL;
@@ -108,35 +99,10 @@ static void USART1_HardwareInit(void)
   gpio.Alternate = GPIO_AF7_USART1;
   HAL_GPIO_Init(GPIOA, &gpio);
 
-  gpio.Pin = GPIO_PIN_10;
-  gpio.Mode = GPIO_MODE_INPUT;
-  gpio.Pull = GPIO_PULLUP;
-  HAL_GPIO_Init(GPIOA, &gpio);
-}
-
-static void USART1_CaptureDiag(uint32_t stage)
-{
-  usart_dbg.stage = stage;
-  usart_dbg.pclk2 = HAL_RCC_GetPCLK2Freq();
-  usart_dbg.rcc_apb2enr = RCC->APB2ENR;
-  usart_dbg.rcc_ccipr1 = RCC->CCIPR1;
-  usart_dbg.cr1 = USART1->CR1;
-  usart_dbg.brr = USART1->BRR;
-  usart_dbg.isr = USART1->ISR;
-  usart_dbg.hal_tick = HAL_GetTick();
-}
-
-static int USART1_BringUp(void)
-{
-  huart1.Instance = USART1;
-  huart1.gState = HAL_UART_STATE_RESET;
-
-  USART1_HardwareInit();
-  USART1_CaptureDiag(1U);
-
-  if (usart_dbg.pclk2 == 0U)
+  pclk2 = HAL_RCC_GetPCLK2Freq();
+  if (pclk2 == 0U)
   {
-    return -1;
+    Error_Handler();
   }
 
   USART1->CR1 = 0U;
@@ -144,52 +110,53 @@ static int USART1_BringUp(void)
   USART1->CR3 = 0U;
   USART1->PRESC = 0U;
   USART1->ICR = 0xFFFFFFFFU;
-  USART1->BRR = (uint16_t)UART_DIV_SAMPLING16(usart_dbg.pclk2, 115200U, UART_PRESCALER_DIV1);
-
-  /* TX only: do not enable RE on a floating/unconnected RX pin. */
+  USART1->BRR = (uint16_t)UART_DIV_SAMPLING16(pclk2, 115200U, UART_PRESCALER_DIV1);
   USART1->CR1 = USART_CR1_UE | USART_CR1_TE;
-  CPU_DelayMs(1U);
-  USART1_CaptureDiag(4U);
-
-  huart1.gState = HAL_UART_STATE_READY;
-  huart1.RxState = HAL_UART_STATE_READY;
-  huart1.Lock = HAL_UNLOCKED;
-  huart1.Init.BaudRate = 115200U;
-  huart1.Init.WordLength = UART_WORDLENGTH_8B;
-  huart1.Init.StopBits = UART_STOPBITS_1;
-  huart1.Init.Parity = UART_PARITY_NONE;
-  huart1.Init.Mode = UART_MODE_TX;
-  huart1.Init.HwFlowCtl = UART_HWCONTROL_NONE;
-  huart1.Init.OverSampling = UART_OVERSAMPLING_16;
-  huart1.Init.OneBitSampling = UART_ONE_BIT_SAMPLE_DISABLE;
-  huart1.Init.ClockPrescaler = UART_PRESCALER_DIV1;
-  return 0;
 }
 
-static void USART1_SendByte(uint8_t byte)
+void USART1_SendByte(uint8_t data)
 {
-  volatile uint32_t timeout = SystemCoreClock / 100U;
-
-  while (((USART1->ISR & USART_ISR_TXE_TXFNF) == 0U) && (timeout > 0U))
+  while ((USART1->ISR & USART_ISR_TXE_TXFNF) == 0U)
   {
-    timeout--;
   }
 
-  if (timeout == 0U)
+  USART1->TDR = data;
+}
+
+void USART1_SendData(const uint8_t *data, uint16_t len)
+{
+  uint16_t i;
+
+  if ((data == NULL) || (len == 0U))
   {
-    USART1_CaptureDiag(5U);
     return;
   }
 
-  USART1->TDR = byte;
+  for (i = 0U; i < len; i++)
+  {
+    USART1_SendByte(data[i]);
+  }
+
+  while ((USART1->ISR & USART_ISR_TC) == 0U)
+  {
+  }
 }
 
-static void USART1_SendString(const char *str)
+void USART1_SendString(const char *str)
 {
+  if (str == NULL)
+  {
+    return;
+  }
+
   while (*str != '\0')
   {
     USART1_SendByte((uint8_t)*str);
     str++;
+  }
+
+  while ((USART1->ISR & USART_ISR_TC) == 0U)
+  {
   }
 }
 /* USER CODE END 0 */
@@ -227,11 +194,8 @@ int main(void)
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
   MX_ICACHE_Init();
-  if (USART1_BringUp() != 0)
-  {
-    Error_Handler();
-  }
   /* USER CODE BEGIN 2 */
+  USART1_Init();
   USART1_SendString("USART1 ready\r\n");
   /* USER CODE END 2 */
 

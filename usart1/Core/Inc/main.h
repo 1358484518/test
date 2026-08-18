@@ -53,7 +53,10 @@ extern "C" {
 void Error_Handler(void);
 
 /* USER CODE BEGIN EFP */
-
+void USART1_Init(void);
+void USART1_SendByte(uint8_t data);
+void USART1_SendData(const uint8_t *data, uint16_t len);
+void USART1_SendString(const char *str);
 /* USER CODE END EFP */
 
 /* Private defines -----------------------------------------------------------*/
