@@ -8,63 +8,160 @@
 <body>
 <header>
   <h1>参数存储</h1>
-  <p>运行参数是结构体 <code>sys_param</code>。掉电要保住的那一份写在 MCU 内部 Flash，不写外部 W25Q。外部 Flash 用来存固件包和离线交易记录，和参数不是同一块介质。</p>
+  <p>运行参数是 <code>system_param_t sys_param</code>，1 字节对齐。掉电保存写在 MCU 内部 Flash，不写外部 W25Q。外部 Flash 只放固件、授权名单和离线记录。</p>
 </header>
 <nav class="top">
   <a href="index.html">目录</a>
-  <a href="charge.html">充电</a>
-  <a href="output.html">输出</a>
-  <a href="protect.html">保护</a>
-  <a href="auth.html">授权</a>
-  <a href="ocpp.html">OCPP</a>
-  <a href="network.html">网络</a>
-  <a href="energy.html">负载</a>
   <a href="param.html">参数</a>
   <a href="upgrade.html">升级</a>
-  <a href="system.html">系统</a>
+  <a href="system.html">差异</a>
 </nav>
 <main>
 <section>
-  <h2>上电怎么读出来</h2>
-  <p><code>main</code> 里先调用 <code>ParamBlock_init</code>，再 <code>sys_param_get</code>。初始化做的事是在三份备份里找出“魔数对、CRC 对、序列号最大”的那一块，把它记成当前块。之后 <code>param_read</code> 只从这一块把数据拷进 <code>sys_param</code>。</p>
-  <p>查找顺序：</p>
-  <ol>
-    <li>主区，Flash Bank2 的 sector 120。里面有 3 块，每块 2048 字节。魔数必须是 <code>0xAA552772</code>。读的时候魔数会连读三次，三次都不对才当无效。数据区做 CRC16，只有和块尾保存的 CRC 低 16 位一致，并且序列号更大，才采纳。</li>
-    <li>主区没有任何一块同时满足魔数和 CRC 时，用同样规则扫备份区 sector 121。找到后把这一块抄回主区。</li>
-    <li>主区和备份区的魔数都整区无效时，再扫第三份，sector 119（地址按 Bank1 的扇区公式计算）。找到就同时写回主区和备份区。</li>
-    <li>第三份只有 CRC 错、魔数还在时，仍用序列号最大的那块，重新算 CRC 后写回前两份。</li>
-    <li>三份都不可用：擦掉主区和备份区，写入一块空数据（数据区填 <code>0xFF</code>），序列号从 0 开始。随后参数检查会发现序列号、服务器地址等是空的，再填默认值。</li>
-  </ol>
-  <p>读路径本身不再验 CRC。<code>param_read</code> 相信初始化已经选好了块，按长度把数据区拷出来。长度超过 2032 字节会直接失败。2032 来自 2048 减去 8 字节头（魔数和序列号）再减去 8 字节尾（CRC 和保留字）。</p>
+  <h2>1. 介质和块格式</h2>
+  <table>
+    <tr><th>区域</th><th>位置</th><th>内容</th><th>写的方式</th></tr>
+    <tr><td>主区</td><td>Bank2 sector 120，基址 <code>0x0900C000</code></td><td>当前参数，3 块 × 2048 字节</td><td><code>ParamBlock_write</code></td></tr>
+    <tr><td>备份区</td><td>Bank2 sector 121</td><td>和主区同一份，3 块</td><td><code>BackupParamBlock_write</code></td></tr>
+    <tr><td>第三份</td><td>sector 119，地址按 <code>0x08100000+0x2000×119</code></td><td>再抄一份</td><td><code>noedata_BackupParamBlock_write</code></td></tr>
+    <tr><td>充电计划</td><td>Bank2 sector 124</td><td>OCPP ChargingProfile</td><td>先整扇区擦除再写，没有三块轮换，也没有这套 CRC 选择</td></tr>
+    <tr><td>安全参数明文</td><td>解密后在 RAM 的 <code>sec_param</code></td><td>授权密钥、蓝牙密码、管理平台密钥</td><td>加密后放进 <code>sys_param.sec_section[128]</code>，随参数一起落盘</td></tr>
+  </table>
+  <table>
+    <tr><th>块内偏移</th><th>字段</th><th>长度</th><th>规则</th></tr>
+    <tr><td>0</td><td>magic</td><td>4</td><td>必须是 <code>0xAA552772</code>。读的时候连读三次，三次都不是才判无效</td></tr>
+    <tr><td>4</td><td>sequence</td><td>4</td><td>每成功写一次加 1。上电选序列号最大且 CRC 正确的块</td></tr>
+    <tr><td>8</td><td>data</td><td>2032</td><td><code>sys_param</code> 放这里。2032 = 2048 − 8 字节头 − 8 字节尾。超长 <code>param_read/write</code> 直接返回 -1</td></tr>
+    <tr><td>2040</td><td>crc</td><td>4</td><td>只使用低 16 位。算法是数据区 2032 字节的 CRC16</td></tr>
+    <tr><td>2044</td><td>reserved</td><td>4</td><td>写入时填 <code>0xFFFFFFFF</code></td></tr>
+  </table>
 </section>
 <section>
-  <h2>什么时候写、写进去之前查什么</h2>
-  <p>业务改完 <code>sys_param</code> 后调用 <code>sys_param_set</code>。它先跑 <code>sys_parm_check_all</code>。桩号、序列号、服务器 URL、授权密钥、管理平台 URL、心跳、采样周期、电流、温度、网络接口等每一项都有范围。任何一项不合法，函数不写 Flash，而是再从当前块把旧参数读回来，内存里刚才的修改作废。</p>
-  <p>校验通过才进 <code>param_write</code>。写之前还有两道闸：</p>
-  <ul>
-    <li>和当前块里的内容逐字节比较。完全一样就返回，不擦不写，日志是参数没有修改。</li>
-    <li><code>lowvoltage_count</code> 大于 25×20 时拒绝写入，避免掉电过程中把半截数据烧进 Flash。</li>
-  </ul>
-  <p>真正要写时，块号加 1，三块用完回到 0；序列号加 1。新块带上魔数、新序列号、参数数据（后面补 <code>0xFF</code>）、以及整段数据区的 CRC16。然后按这个顺序各写一份：第三份（sector 119）、备份区（sector 121）、主区（sector 120）。所以一次成功的保存，三份里都会出现这个新序列号。</p>
-  <p>调用 <code>sys_param_set</code> 的地方包括：OCPP 的 ChangeConfiguration 和复位相关配置、蓝牙改参数（<code>APP_Save_Config</code> 就是它）、网页保存配置、调试串口改参数、保存时钟和时区。恢复出厂 <code>sys_param_reset</code> 会先记住序列号和桩号，其余填默认值，再写回去，序列号和桩号不会被清掉。</p>
-  <div class="note">升级流程在下载成功后把 <code>fw_update_state</code> 改成 1 或 11，并置 <code>save_config</code>。源码里只有置位，没有看到谁读取这个标志再调用 <code>sys_param_set</code>。因此升级状态是否落盘，取决于后面还有没有别的保存把整个结构体写进去。</div>
+  <h2>2. 上电选哪一块</h2>
+  <p><code>main</code> 调用 <code>ParamBlock_init</code>，然后 <code>SysConfig_Init</code> 里 <code>sys_param_get</code> 从选中的块把数据拷进 RAM。<code>param_read</code> 不再验 CRC。</p>
+  <table>
+    <tr><th>顺序</th><th>条件</th><th>动作</th></tr>
+    <tr><td>1</td><td>主区 3 块里有魔数正确且 CRC 一致的块</td><td>取序列号最大的一块，作为 <code>latest_block</code></td></tr>
+    <tr><td>2</td><td>主区没有合格块</td><td>用同样规则扫备份区 sector 121。找到则擦主区，把该块抄回主区。日志：<code>use 2</code></td></tr>
+    <tr><td>3</td><td>主区和备份区魔数都整区无效（各至少 3 块魔数错）</td><td>扫第三份 sector 119。找到则擦主区和备份区，两份都写回。日志：<code>use 0</code></td></tr>
+    <tr><td>4</td><td>第三份魔数在，但 CRC 都不对</td><td>仍用序列号最大的那块，重算 CRC 后写回主区和备份区。日志：<code>0 crc error, use 0</code></td></tr>
+    <tr><td>5</td><td>三份都没有可用魔数</td><td>擦主区和备份区，写一块数据区全 <code>0xFF</code> 的空块，序列号 0。日志：<code>erase_param_sector 0</code></td></tr>
+    <tr><td>6</td><td>主区魔数全无效，备份区还有魔数但 CRC 错</td><td>用备份区序列号最大的块重算 CRC，写回主区并擦备份区再写。日志：<code>use 1</code> 或 <code>use 2</code></td></tr>
+  </table>
+  <table>
+    <tr><th>读出之后</th><th>条件</th><th>动作</th></tr>
+    <tr><td>版本或芯片不对</td><td><code>(version &amp; 0xFFFFFF00) != 0x5AA58000</code>，或 <code>uniqueID</code> 不等于本芯片 UID 的 8 位十六进制</td><td>整份恢复默认并写入，安全参数也重置。<code>SYS_PARAM_VERSION</code> 当前是 <code>0x5AA58003</code></td></tr>
+    <tr><td>旧版本升级</td><td>版本小于 <code>0x5AA58001</code></td><td>离线充电时间补成 10 分钟</td></tr>
+    <tr><td>旧版本升级</td><td>版本小于 <code>0x5AA58002</code></td><td>过压、欠压门限补成默认值</td></tr>
+    <tr><td>收尾</td><td>每次 <code>SysConfig_Init</code></td><td><code>check_config_info</code> 把明显非法的字段改成默认，然后无条件再 <code>sys_param_set</code> 一次</td></tr>
+  </table>
 </section>
 <section>
-  <h2>一块参数里有什么</h2>
-  <p>默认值在 <code>sys_param_set_to_default</code>。和运行直接相关的包括：</p>
-  <ul>
-    <li>身份：序列号、桩号、MCU 唯一号。服务器地址、局域网 IP、网关、掩码、DNS、MAC。DHCP 默认关。</li>
-    <li>网络：WiFi 名和密码、4G 的 APN（账号密码默认 user/pass）、使能的接口。充电模式默认 3。额定电流、保护温度。</li>
-    <li>OCPP：心跳 300 秒，电量采样 60 秒，连接超时 90 秒。离线本地授权和本地名单默认开，授权缓存默认关，预授权默认开，未知身份离线交易默认关。无效身份最多 2000（和停止条件里的电量比较）。交易报文最多试 3 次，间隔 10 秒。管理平台默认关。</li>
-    <li>保护门限、灯亮度、电表波特率 9600、地址 1。离线自动充电默认 10 分钟。防拆和 OPDD 默认开。保护屏蔽字默认 <code>0x27000001</code>。电压电流校准系数默认 1，功率系数默认 0.985。</li>
-    <li>拨码：默认值会按 BCD1、BCD2、BCD3 的电平写进 <code>dip_level</code>。</li>
-  </ul>
-  <p>读出之后 <code>check_config_info</code> 再扫一遍。序列号首字节是 0 或 <code>0xFF</code>、URL 不像 ws/wss、心跳或电流超出范围、电表地址不在 1～254，都会改成默认值。这一步改的是内存；要落盘仍得再走 <code>sys_param_set</code>。</p>
-  <p>授权密钥这类字段放在 <code>sec_section</code> 里，用 AES-CBC 加密后再随 <code>sys_param</code> 一起写入。密钥由 MCU 唯一号推导。读的时候 <code>sec_param_get</code> 解密到另一块内存，校验授权密钥时用的是解密后的内容。</p>
+  <h2>3. 写入闸门</h2>
+  <table>
+    <tr><th>步骤</th><th>函数</th><th>不通过时</th></tr>
+    <tr><td>全字段检查</td><td><code>sys_param_set</code> → <code>sys_parm_check_all</code></td><td>不写 Flash，重新 <code>param_read</code>，内存里刚改的值作废</td></tr>
+    <tr><td>和当前块比较</td><td><code>param_write</code></td><td>内容相同直接返回 0，日志 <code>PARAM have not been modified</code></td></tr>
+    <tr><td>低压</td><td><code>lowvoltage_count &gt; 500</code>（25×20）</td><td>返回 -1，日志 <code>PARAM Write failed: low voltage</code></td></tr>
+    <tr><td>落盘</td><td>块号 +1，三块用完回到 0；序列号 +1</td><td>先写第三份，再写备份区，最后写主区</td></tr>
+  </table>
+  <table>
+    <tr><th>谁调用 <code>sys_param_set</code></th><th>时机</th></tr>
+    <tr><td>OCPP <code>ChangeConfiguration</code></td><td>单项检查通过并改完内存之后，注释写明写 FLASH</td></tr>
+    <tr><td>蓝牙 <code>APP_Save_Config()</code></td><td>各设置命令改完对应字段后立刻保存</td></tr>
+    <tr><td>网页配置页</td><td>保存配置时；改完若需要重启会另置 <code>system_reboot</code></td></tr>
+    <tr><td>调试串口</td><td>改模式、改单项参数之后</td></tr>
+    <tr><td><code>save_datatime</code> / <code>save_timezone</code></td><td>写 unix 时间或时区</td></tr>
+    <tr><td><code>sys_param_reset</code></td><td>恢复默认，但保留原来的 SN，桩号写成这份 SN，uniqueID 写成当前芯片</td></tr>
+  </table>
+  <div class="note">下载成功后程序把 <code>fw_update_state</code> 改成 1 或 11，并置 <code>user_event.save_config</code>。全工程只有这几处赋值，没有读这个标志再调用 <code>sys_param_set</code> 的代码。升级状态要落盘，得靠后面另一次 <code>sys_param_set</code> 把整个结构体写进去。</div>
 </section>
 <section>
-  <h2>不在这三份里的数据</h2>
-  <p>OCPP 充电计划单独占 sector 124。<code>ChargingProfile_write</code> 先整扇区擦除再写入，没有三块轮换，也没有上面那套 CRC 选择。离线交易记录走 <code>ChargeRecord_Handle.c</code> 的另一段 Flash 地址，按记录追加，不是 <code>sys_param</code>。固件包在外部 W25Q，见<a href="upgrade.html">升级</a>。</p>
+  <h2>4. 字段、默认值、合法范围</h2>
+  <p>范围是 <code>ParamCheck_*</code> 拒绝写入的界限。<code>check_config_info</code> 对已经在 Flash 里的旧值再做一轮钳位，两边不完全相同。电压单位和采样一致，过压默认宏是 <code>DEFAULT_UPPER_VOLTAGE</code>。</p>
+  <h3>身份和服务器</h3>
+  <table>
+    <tr><th>字段</th><th>长度</th><th>默认</th><th>写入检查</th></tr>
+    <tr><td>version</td><td>4</td><td><code>0x5AA58003</code></td><td>不单独检查。上电用来判断要不要恢复默认或补字段</td></tr>
+    <tr><td>sn</td><td>21</td><td><code>DEFAULT_INDENTIFIER</code></td><td>非空且无 <code>\</code> 和 <code>"</code>。首字节 0 或 0xFF 时读出后改回默认</td></tr>
+    <tr><td>uniqueID</td><td>10</td><td>芯片 UID 异或后的 8 位十六进制</td><td>和本机不一致就整份恢复默认</td></tr>
+    <tr><td>chargerID</td><td>21</td><td>等于 sn</td><td>同字符串检查</td></tr>
+    <tr><td>serverurl</td><td>129</td><td><code>DEFAULT_SERVER_URL</code></td><td>必须以 <code>ws://</code> 或 <code>wss://</code> 开头</td></tr>
+    <tr><td>ocpp_admin_url</td><td>129</td><td><code>DEFAULT_ADMIN_URL</code></td><td>同样必须 ws/wss。读出后若不像 URL，改回默认</td></tr>
+    <tr><td>ocpp_admin_mode</td><td>1</td><td>0</td><td>0 或 1。大于 1 时读出后改成 0</td></tr>
+  </table>
+  <h3>局域网、WiFi、4G</h3>
+  <table>
+    <tr><th>字段</th><th>长度</th><th>默认</th><th>写入检查</th></tr>
+    <tr><td>ipaddress / gateway / subMask / chargerDNS</td><td>各 16</td><td><code>DEFAULT_IP_ADDR</code> 等</td><td>静态 IP 字符串检查</td></tr>
+    <tr><td>macAddress</td><td>18</td><td><code>52:88:</code> 加 UID 四个字节</td><td>—</td></tr>
+    <tr><td>dhcp_enable</td><td>1</td><td>0</td><td>0 或 1</td></tr>
+    <tr><td>WIFIssid</td><td>33</td><td><code>DEFAULT_WIFI_SSID</code></td><td>字符串检查</td></tr>
+    <tr><td>WIFIkey</td><td>65</td><td><code>DEFAULT_WIFI_PWD</code></td><td>字符串检查</td></tr>
+    <tr><td>sim_APN / account / password</td><td>各 33</td><td>APN 为默认宏，账号 <code>user</code>，密码 <code>pass</code></td><td>各自字符串检查</td></tr>
+    <tr><td>net_interfaces_enable</td><td>1</td><td><code>DEFAULT_NET_INTFACES</code></td><td>按位使能 LAN / WiFi / 4G</td></tr>
+  </table>
+  <h3>充电和 OCPP</h3>
+  <table>
+    <tr><th>字段</th><th>默认</th><th>写入检查</th><th>程序里怎么用</th></tr>
+    <tr><td>chargemode</td><td>3</td><td>1～3</td><td>1 联网刷卡，2 只认本地卡，3 刷卡分支为空</td></tr>
+    <tr><td>rated_current</td><td><code>DEFAULT_32A_POWER</code></td><td>6～该产品上限</td><td>PWM 合成的起点</td></tr>
+    <tr><td>max_temperature</td><td><code>MAXTEMPRETURE</code></td><td>50～200</td><td>达到此值持续 5 秒报过温；减 5℃ 持续 5 秒降半载</td></tr>
+    <tr><td>ocpp_HeartbeatInterval</td><td>300 秒</td><td>0～86400</td><td>0 或大于 3600 时状态通知改成约每小时一条</td></tr>
+    <tr><td>ocpp_MeterValueSampleInterval</td><td>60 秒</td><td>0～86400</td><td>0 表示不周期上报电量</td></tr>
+    <tr><td>ocpp_WebSocketPingInterval</td><td>0</td><td>0～86400</td><td>0 则定时器被改成 24 小时</td></tr>
+    <tr><td>ocpp_ConnectionTimeOut</td><td>90 秒</td><td>1～600</td><td>授权后这么久还没进准备，清授权</td></tr>
+    <tr><td>ocpp_LocalAuthorizeOffline</td><td>1</td><td>布尔字符串</td><td>未登录时是否查本地授权</td></tr>
+    <tr><td>ocpp_LocalAuthListEnabled</td><td>1</td><td>布尔</td><td>本地名单</td></tr>
+    <tr><td>ocpp_AuthorizationCacheEnabled</td><td>0</td><td>布尔</td><td>授权缓存默认关</td></tr>
+    <tr><td>ocpp_LocalPreAuthorize</td><td>1</td><td>布尔</td><td>已登录时本地预授权可直接启动</td></tr>
+    <tr><td>ocpp_AllowOfflineTxForUnknownId</td><td>0</td><td>布尔</td><td>未知卡离线能否充电。<code>auth_type</code> 因此变成 2</td></tr>
+    <tr><td>ocpp_MaxEnergyOnInvalidId</td><td>2000</td><td>≥0</td><td>无效身份电量超过此值就停</td></tr>
+    <tr><td>ocpp_TransactionMessageAttempts</td><td>3</td><td>—</td><td>与发送超时次数同一量级</td></tr>
+    <tr><td>ocpp_TransactionMessageRetryInterval</td><td>10</td><td>—</td><td>交易报文重试间隔</td></tr>
+    <tr><td>ocpp_OfflineChargingTime</td><td>10 分钟</td><td>0～14400。读出大于 14400 改成 10</td><td>0 表示不自动离线充电</td></tr>
+    <tr><td>ocpp_free_idtag</td><td><code>freeIdTag</code></td><td>—</td><td>蓝牙、光伏、离线自动充电用的身份</td></tr>
+    <tr><td>idtag_num / idtag[10][21]</td><td>0 / 空</td><td>—</td><td>蓝牙和刷卡绑的本地卡，最多 10 张</td></tr>
+  </table>
+  <h3>保护、电表、负载</h3>
+  <table>
+    <tr><th>字段</th><th>默认</th><th>检查或钳位</th><th>作用</th></tr>
+    <tr><td>upper_limit_protection_voltage</td><td><code>DEFAULT_UPPER_VOLTAGE</code></td><td>250～265</td><td>过压门限</td></tr>
+    <tr><td>lower_limit_protection_voltage</td><td><code>DEFAULT_LOWER_VOLTAGE</code></td><td>175～210</td><td>欠压门限</td></tr>
+    <tr><td>protection_disable</td><td><code>0x27000001</code></td><td>—</td><td>bit0 置位时准备态做 CP 二极管检查，否则直接当通过</td></tr>
+    <tr><td>OPDD_enable</td><td>1</td><td>0 或 1</td><td>大于 1 时读出后改成 1</td></tr>
+    <tr><td>Tamper_Enalbe</td><td>1</td><td>0 或 1</td><td>防拆使能。拼写就是 Enalbe</td></tr>
+    <tr><td>power_distribution_enable</td><td>0</td><td>—</td><td>0 时家庭负载电流等于额定电流</td></tr>
+    <tr><td>home_power_current</td><td>100</td><td>—</td><td>家庭最大电流，计算时再减 2A</td></tr>
+    <tr><td>solar_mode</td><td>0</td><td>—</td><td>0 关闭光伏限流</td></tr>
+    <tr><td>solar_current_from_grid</td><td>0</td><td>注释写小于 0，或 6～32A</td><td>允许从电网取的电流</td></tr>
+    <tr><td>solar_stable_time</td><td>10</td><td>注释 10～3600 秒</td><td>光伏滞回</td></tr>
+    <tr><td>meter_baudrate</td><td>9600</td><td>读出后不在 1200～115200 则改回 9600</td><td>外置电表串口</td></tr>
+    <tr><td>meter_address</td><td>1</td><td>读出后不在 1～254 则改回 1</td><td>Modbus 地址</td></tr>
+    <tr><td>voltage/current_calibration_ratio</td><td>1.0</td><td>—</td><td>采样校准</td></tr>
+    <tr><td>power_calibration_ratio</td><td>0.985</td><td>读出后不在 0.8～1.2 或是 NaN，改回 0.985</td><td>功率校准</td></tr>
+    <tr><td>elock_version</td><td>2</td><td>0～2。大于 2 读出后改 0</td><td>电子锁版本</td></tr>
+    <tr><td>fw_update_state</td><td>0</td><td>注释：0 空闲，1 升级中，2 成功，3 失败</td><td>签名升级另外使用 11、12、13</td></tr>
+    <tr><td>dip_level</td><td>按 BCD1/2/3 低电平置 bit0/1/2</td><td>—</td><td>只在恢复默认时采样一次拨码</td></tr>
+  </table>
+  <h3>加密段</h3>
+  <table>
+    <tr><th>明文 <code>sec_param</code></th><th>长度</th><th>存放</th></tr>
+    <tr><td>ocpp_AuthorizationKey</td><td>48</td><td rowspan="3">AES-CBC 加密进 <code>sec_section</code>，密钥由 MCU 唯一号推导。<code>sec_version</code>、<code>sec_length</code> 记在 <code>sys_param</code> 里。版本高字节不是安全参数版本时整段重置</td></tr>
+    <tr><td>bt_password</td><td>16</td></tr>
+    <tr><td>ocpp_admin_AuthorizationKey</td><td>48</td></tr>
+  </table>
+</section>
+<section>
+  <h2>5. 不在这三份参数里的存储</h2>
+  <table>
+    <tr><th>数据</th><th>介质和地址</th><th>格式</th></tr>
+    <tr><td>充电计划</td><td>内部 Flash sector 124</td><td>擦除后整段写入，无轮换</td></tr>
+    <tr><td>本地授权名单</td><td>内部 Flash <code>0x0807D000</code>，另外外部 Flash <code>0x00091000</code>～<code>0x000D1000</code></td><td><code>rfidlist_t</code>：版本、条数、CRC、96×21 字节卡号。<code>sys_param.idtag</code> 只有 10 张，是另一份短名单</td></tr>
+    <tr><td>授权缓存</td><td>外部 Flash <code>0x00081000</code></td><td>带魔数</td></tr>
+    <tr><td>离线交易</td><td>外部 Flash <code>0x003E0000</code>～<code>0x00400000</code></td><td>按页追加，不是 <code>sys_param</code></td></tr>
+    <tr><td>固件包和完成标志</td><td>外部 Flash <code>0x00001000</code> 和 <code>0x00000000</code></td><td>见<a href="upgrade.html">升级</a></td></tr>
+  </table>
   <p><a href="upgrade.html">下一章：升级</a></p>
 </section>
 </main>
