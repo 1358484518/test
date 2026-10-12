@@ -162,6 +162,74 @@
   </table>
 </section>
 <section>
+  <h2>4A. 每个参数实际控制什么</h2>
+  <p>上一节是能不能写入。这一节是写进去之后程序用它做什么。没有读到使用点的字段单独列在最后，移植时不要假设它们已经生效。</p>
+  <table>
+    <tr><th>参数</th><th>控制的功能</th><th>程序行为</th></tr>
+    <tr><td>chargemode</td><td>谁能开始充电</td><td>1：刷卡可走 OCPP Authorize，远程启停只在这个模式改授权。2：只认本地卡。3：刷卡函数为空；100 ms 任务插枪满 1 秒后用 freeIdTag 自动授权。默认 3</td></tr>
+    <tr><td>rated_current</td><td>CP 电流上限</td><td>PWM 合成的起点，也是家庭负载关闭时的 dlm_current。过流门槛默认用它，枪线时再和 PP 取小</td></tr>
+    <tr><td>max_temperature</td><td>过温和降功率</td><td>达到该值持续 5 秒报过温，充电进暂停。低 5℃ 持续 5 秒把 PWM 限到额定一半。回到低 12℃ 以下才恢复</td></tr>
+    <tr><td>power_distribution_enable</td><td>家庭负载</td><td>0：dlm_current 等于额定电流。1：可用电流 = home_power_current − 2 − 其他负载，带滞回后写入 dlm_current</td></tr>
+    <tr><td>home_power_current</td><td>家庭总电流</td><td>只在家庭负载打开时使用。读出大于 120 会改回 100</td></tr>
+    <tr><td>sampling_methord</td><td>外部电流从哪来</td><td>0～7。等于 4 时 CT 广播任务去收 UDP；否则若广播间隔大于 0 就向外发 CT。主循环里这个广播函数当前被注释，所以这条只在函数被重新挂上时生效。蓝牙里它叫采样方式</td></tr>
+    <tr><td>power_meter_type / power_meter_addr</td><td>家庭电表</td><td>地址小于等于 0 时改回 1。和充电电表的 meter_address 不是同一个字段</td></tr>
+    <tr><td>solar_mode</td><td>光伏限流和自动开充</td><td>0：光伏电流等于额定，不限制。非 0：按富余功率折电流，并可在等待或结束时用免费身份自动启动</td></tr>
+    <tr><td>solar_current_from_grid</td><td>允许从电网取的电流</td><td>参与光伏提供电流。小于等于 0 时和富余电流相加；大于 0 且富余为负时只用这一段</td></tr>
+    <tr><td>solar_stable_time</td><td>光伏滞回</td><td>默认 10 秒，注释范围 10～3600。升降电流不会每 100 ms 改一次</td></tr>
+    <tr><td>dlb_mode</td><td>485 上的桩群从机</td><td>0 或拨码在电表侧：不跑从机，电流用额定。1：收 0x10/0x06，60 秒无帧则电流 6A 并报故障码 13</td></tr>
+    <tr><td>dlb_id</td><td>调试口里的从机地址参数</td><td>ParameterSet 的 RS485SlaveAddress 改它。运行时的 Modbus 从机地址仍是代码里的 0x01，没有赋成 dlb_id</td></tr>
+    <tr><td>dlb_num</td><td>桩数量</td><td>存在参数里。DLB 电流计算看的是收到的寄存器，不是这个数量</td></tr>
+    <tr><td>serverurl</td><td>主 OCPP</td><td>解析出主机、端口、路径。以 wss 开头则这条连接走 TLS</td></tr>
+    <tr><td>ocpp_admin_mode / ocpp_admin_url</td><td>第二路 OCPP</td><td>mode 为 1 时主循环再握手第二路。第二路不发启停交易和 MeterValues</td></tr>
+    <tr><td>ocpp_AuthorizationKey 等</td><td>WebSocket 基本认证</td><td>在加密段里。握手用解密后的密钥</td></tr>
+    <tr><td>ocpp_HeartbeatInterval</td><td>心跳</td><td>Boot 接受后按秒定时。0 或大于 3600 时，状态通知改成约每小时一条</td></tr>
+    <tr><td>ocpp_MeterValueSampleInterval</td><td>电量上报</td><td>充电或暂停中按秒采样。0 不上报周期电量</td></tr>
+    <tr><td>ocpp_WebSocketPingInterval</td><td>链路保活</td><td>不是 OCPP 报文。0 则定时器被拉到 24 小时</td></tr>
+    <tr><td>ocpp_ConnectionTimeOut</td><td>授权超时</td><td>授权后这么多秒还没进准备，清 on_charging，原因记成车断开。范围 1～600，默认 90</td></tr>
+    <tr><td>ocpp_LocalAuthorizeOffline</td><td>离线刷卡</td><td>未登录时是否允许查本地授权</td></tr>
+    <tr><td>ocpp_LocalPreAuthorize</td><td>在线预授权</td><td>已登录时本地鉴权通过就可以直接启动，不必等 Authorize 应答</td></tr>
+    <tr><td>ocpp_AllowOfflineTxForUnknownId</td><td>未知卡</td><td>离线且本地授权结果为未知时仍可启动，auth_type 设为 2</td></tr>
+    <tr><td>ocpp_MaxEnergyOnInvalidId</td><td>无效身份限额</td><td>auth_type 为 2 且电量超过该值就停充，原因 DeAuthorized</td></tr>
+    <tr><td>ocpp_StopTransactionOnInvalidId</td><td>配置项</td><td>可经 OCPP 改。停充动作实际看的是上面的电量比较和 auth_type</td></tr>
+    <tr><td>ocpp_LocalAuthListEnabled / AuthorizationCacheEnabled</td><td>名单和缓存</td><td>决定本地名单、授权缓存是否参与刷卡。缓存默认关，名单默认开</td></tr>
+    <tr><td>ocpp_OfflineChargingTime</td><td>断网自动充</td><td>单位分钟。0 关闭。大于 0 且未登录、断线超过该时间、插枪超过 3 秒、等待态，用免费身份启动。大于 14400 读出后改成 10</td></tr>
+    <tr><td>ocpp_free_idtag</td><td>免费身份字符串</td><td>即插即充、光伏、离线自动充、蓝牙启动都写这个 idTag。默认 freeIdTag</td></tr>
+    <tr><td>idtag / idtag_num</td><td>桩上短名单</td><td>最多 10 张。未插枪且等待时，管理员卡进入绑卡，再刷的卡追加到这里。和外部 Flash 里的 OCPP 本地名单不是同一份</td></tr>
+    <tr><td>ocpp_availability</td><td>桩是否可用</td><td>0：上电把 unavailable_enable 置 1，等待态进不可用。1：可用。ChangeAvailability 改它并保存</td></tr>
+    <tr><td>ocpp_UnlockConnectorOnEVSideDisconnect</td><td>拔枪解锁</td><td>枪线才有锁。为 1 时，没有 lock_enable 或收到远程解锁就开锁。为 0 时，只要 PP 不是未插枪就保持上锁，远程解锁仍可开</td></tr>
+    <tr><td>ocpp_StopTransactionOnEVSideDisconnect</td><td>拔枪停交易</td><td>默认 1，只允许 0 或 1。拔枪停充在状态机里是看 bChargerConnect 变成 0，不读取这个字段做分支</td></tr>
+    <tr><td>ocpp_ConnectorPhaseRotation</td><td>单相接在哪一相</td><td>0～7。DLB 功能码 0x10 时：0～3 用第 1 相电流，4～5 用第 2 相，6～7 用第 3 相</td></tr>
+    <tr><td>ocpp_GetCTClampValue / Interval</td><td>钳形电流上报</td><td>Interval 大于 0 且 Boot 已接受时，定时发 DataTransfer。Value 为 2 时应答后还会再发一拍</td></tr>
+    <tr><td>net_interfaces_enable</td><td>用哪张网</td><td>按位。重配时优先 LAN，否则 WiFi，否则 4G。运行中谁已经 TCP 连上就切过去</td></tr>
+    <tr><td>dhcp_enable 和 IP 四元组</td><td>有线静态地址</td><td>dhcp 为 0 时用 ip、网关、掩码、DNS。网页和 W5500 初始化读这些</td></tr>
+    <tr><td>WIFIssid / WIFIkey</td><td>WiFi 关联</td><td>BW20 发 AT+WJAP 时用这两个字符串</td></tr>
+    <tr><td>sim_APN / account / password</td><td>4G 拨号</td><td>SIM_Init 把这三项交给模组</td></tr>
+    <tr><td>meter_baudrate / meter_address</td><td>充电电表</td><td>只在拨码电表侧轮询。地址必须和应答第一字节一致</td></tr>
+    <tr><td>upper / lower_limit_protection_voltage</td><td>过压欠压</td><td>和采样电压比较，计数确认后置告警。过压且仍插枪时，标志保持到拔枪</td></tr>
+    <tr><td>power_supply_mode</td><td>接地判断</td><td>0 自动：三相 N-PE ≥ 200、单相 ≥ 700 判接地故障，恢复门槛 500。1：按 IT/三相公式把 L-PE 乘 1.73 再和 L-N 比，差值不超过 200 认为接地正常。过压在模式 1 或单相时只看 L1</td></tr>
+    <tr><td>protection_disable</td><td>哪些保护不做</td><td>默认 0x27000001。bit0 为 1 时准备态做 CP 二极管检查，否则直接当通过</td></tr>
+    <tr><td>OPDD_enable</td><td>PEN/开路保护开关</td><td>默认开。check_opdd_state 返回这个值</td></tr>
+    <tr><td>Tamper_Enalbe</td><td>防拆</td><td>为 1 且开盖信号持续约 500 次才置故障，并发 SecurityEventNotification</td></tr>
+    <tr><td>light / ocpp_LightIntensity</td><td>灯亮度</td><td>改 light 后立刻 light_set_brightness。上电用 light</td></tr>
+    <tr><td>time_zone / unixtime</td><td>本地时间</td><td>save_timezone、save_datatime 写入并落盘。OCPP 时间戳和预约到期用系统时间</td></tr>
+    <tr><td>fw_update_state</td><td>升级结果</td><td>1 或 11 表示下载已完成、等 Boot。上电读外部 Flash 标志：标志还在则记失败 3/13，标志消失则记成功 2/12，再由 OCPP 上报</td></tr>
+    <tr><td>voltage/current/power_calibration_ratio 和分相系数</td><td>采样换算</td><td>功率系数超出 0.8～1.2 或 NaN 时改回 0.985。校准命令 SET_CAL_COEFF 改这些值</td></tr>
+    <tr><td>elock_version</td><td>锁驱动版本</td><td>0～2，默认 2。大于 2 读出后改 0。锁流程按版本选占空比</td></tr>
+    <tr><td>debug_output</td><td>串口日志</td><td>DEBUG OUTPUT ENABLE/DISABLE 改它并保存</td></tr>
+    <tr><td>dip_level</td><td>拨码快照</td><td>只在恢复默认时按 BCD1/2/3 写一次。运行中的电表/DLB 切换看的是实时 bcd3_state，不是这个快照</td></tr>
+  </table>
+  <table>
+    <tr><th>字段</th><th>现状</th></tr>
+    <tr><td>parking_space_enable</td><td>能存、能用调试口读写。充电和插枪判断没有读它</td></tr>
+    <tr><td>rfid_power、main_led</td><td>能经 OCPP 读写并保存。RFID 任务和灯任务没有读这两个值</td></tr>
+    <tr><td>Language_selection、lcd_QR、LcdBrightness、llb_currunt、RelayPhaseSelection、PauseModeSelection、DLMMaxCur、DLM485Addr、modbus_Function_switch、mdbus_Current_limit、modbus_Fallback_currunt、Comm_timeout、idtag_timeout、charging_sampling_methord</td><td>在结构体里占位置。当前 .c 业务里没有读取。移植时不要凭字段名实现功能，除非另行加逻辑</td></tr>
+    <tr><td>ocpp_MeterValuesSampledData 及 Aligned/Stop 几组</td><td>决定 MeterValues 里带哪些量。默认开电能、功率、提供电流、电流、电压、温度，关电网电流</td></tr>
+    <tr><td>ocpp_ClockAlignedDataInterval</td><td>默认 0。对齐采样周期，0 表示不做时钟对齐上报</td></tr>
+    <tr><td>ocpp_ResetRetries、TransactionMessageAttempts、TransactionMessageRetryInterval</td><td>默认 1、3、10。交易发送超时次数在任务里写成 3 次，和 Attempts 同一量级</td></tr>
+    <tr><td>ct_clamps 广播端口和间隔</td><td>默认端口 10000，间隔 5。广播函数在主循环被注释，间隔只在函数启用且采样方式不是 4 时用来发送</td></tr>
+  </table>
+</section>
+<section>
   <h2>5. 内部 Flash 和外部 Flash 分开记</h2>
   <p>两套介质不要混。内部 Flash 由 <code>param_write</code>、<code>ChargingProfile_write</code> 写。外部是 W25Q，函数是 <code>DEV_W25X_Read/Write</code>。安全密钥不单独占内部地址，加密后塞进 <code>sys_param.sec_section</code>，跟参数走同一套三块轮写。</p>
   <h3>内部 Flash：现在真正在写的</h3>
