@@ -12,6 +12,7 @@
 </header>
 <nav class="top">
   <a href="index.html">目录</a>
+  <a href="flow.html">总纲</a>
   <a href="charge.html">充电</a>
   <a href="output.html">输出</a>
   <a href="protect.html">保护</a>
@@ -74,10 +75,11 @@ set_led_proc();</code></pre>
     <li>蓝牙充电控制命令为“1”，且当前是等待或准备：用免费身份置 1。</li>
     <li>光伏：富余电流和当前允许电流都不小于 6A，插枪超过 3 秒，尚未授权，状态是等待或结束。</li>
     <li>离线自动充电：Boot 未被接受，离线时间参数大于 0，断线超过该分钟数，插枪超过 3 秒，状态是等待。</li>
+    <li>即插即充：<code>chargemode == 3</code> 或安装测试模式。上电 8.5 秒内不动作。等待态已插枪超过 1 秒，且没有被按键停过、没有故障停机，就把授权位置 1，身份用免费 idTag。强制按键在等待或故障态也会置 1；在充电、暂停、结束态把授权清 0，原因 Local，并且记住“按键结束”，拔枪前不会再次自动启动。</li>
   </ul>
   <p>清 0 的路径：拔枪（停止原因 EVDisconnected）、远程停止（仅模式 1，原因 Remote）、蓝牙命令“2”（原因 Local）、同卡或管理员卡再次刷卡（原因 Local）、Authorize 被拒绝、无效身份充电量超过 <code>MaxEnergyOnInvalidId</code>。模式 3 的远程停止只回 Accepted，清授权的语句被注释掉了。</p>
   <p>授权之后如果一直不满足启动条件，等待函数用 <code>ocpp_ConnectionTimeOut</code> 秒倒计时，超时也清授权，原因同样记成车断开。</p>
-  <div class="note">模式 3 的注释写的是即插即充，刷卡分支是空的。源码里没有“CP 一变成 9V 就把 on_charging 置 1”的语句。出厂默认模式就是 3。清单写的插枪即充，在当前程序里没有一条完整自动启动路径。</div>
+  <div class="note">模式 3 的刷卡函数是空的，不在 RFID 里启动。自动启动在 100 ms 的 <code>user_auto_charge_check</code>：插枪满 1 秒后置授权。出厂默认模式就是 3。</div>
 </section>
 <section id="states">
   <h2>1.4 八个状态</h2>

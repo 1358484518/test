@@ -12,6 +12,7 @@
 </header>
 <nav class="top">
   <a href="index.html">目录</a>
+  <a href="flow.html">总纲</a>
   <a href="charge.html">充电</a>
   <a href="output.html">输出</a>
   <a href="protect.html">保护</a>
@@ -30,14 +31,14 @@
   <table>
     <tr><th>清单条目</th><th>清单</th><th>源码实际</th></tr>
     <tr><td>WiFi/BLE 模组</td><td>ESP32，不支持跟 BW20 自动切换</td><td>正常循环调用 <code>wifi_ble_task</code>，AT 命令是 BW20 的。 <code>esp32_process</code> 只在测试模式。</td></tr>
-    <tr><td>插枪即充</td><td>软件支持</td><td>模式 3 注释是即插即充，刷卡为空，没有插枪自动授权。默认模式就是 3。</td></tr>
+    <tr><td>插枪即充</td><td>软件支持</td><td>模式 3 不走刷卡。100 ms 任务在插枪满 1 秒后置授权，身份是免费 idTag。上电前 8.5 秒不启动。</td></tr>
     <tr><td>脱机自动充电</td><td>待定</td><td>已实现。时间为 0 或已登录则不触发。</td></tr>
     <tr><td>急停</td><td>硬件没有，不支持</td><td>软件仍读急停脚，故障码 9，按停机。</td></tr>
     <tr><td>Tamper、DLB 通信</td><td>待定</td><td>都有检测。防拆发安全事件。DLB 通信失败只亮紫灯，不停充。</td></tr>
     <tr><td>签名固件、安全事件</td><td>不支持</td><td>收发函数和标志位都在。</td></tr>
     <tr><td>GetLog</td><td>支持</td><td>没有这个报文。有本地日志和 GetDiagnostics。</td></tr>
     <tr><td>双 OCPP</td><td>不支持</td><td><code>ocpp_admin_mode &gt; 0</code> 时有第二路，报文比主路少。</td></tr>
-    <tr><td>掉线 60 分钟重启</td><td>待定</td><td>不是整机 60 分钟重启。WiFi 连接 20 分钟无 OCPP 数据则模组 <code>AT+RST</code>。</td></tr>
+    <tr><td>掉线 60 分钟重启</td><td>待定</td><td>两套都有。未插枪、曾经连上过平台、距上次网络活动超过 60 分钟，再持续约 3 秒就整机复位。另外 WiFi 已连接但 20 分钟无 OCPP 数据时，模组 <code>AT+RST</code>。</td></tr>
     <tr><td>AT+RESTORE</td><td>待定</td><td>在旧 ESP32 初始化里。BW20 复位用 <code>AT+RST</code>。</td></tr>
     <tr><td>HEMS</td><td>不支持</td><td>减电流代码被编译掉。UDP 函数还在，主循环调用被注释。</td></tr>
     <tr><td>蓝牙传固件</td><td>不支持</td><td>协议里有请求、下载、校验三条命令。</td></tr>

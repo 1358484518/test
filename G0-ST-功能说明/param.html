@@ -12,6 +12,7 @@
 </header>
 <nav class="top">
   <a href="index.html">目录</a>
+  <a href="flow.html">总纲</a>
   <a href="charge.html">充电</a>
   <a href="output.html">输出</a>
   <a href="protect.html">保护</a>
@@ -80,9 +81,9 @@
     <tr><td>网页配置页</td><td>保存配置时；改完若需要重启会另置 <code>system_reboot</code></td></tr>
     <tr><td>调试串口</td><td>改模式、改单项参数之后</td></tr>
     <tr><td><code>save_datatime</code> / <code>save_timezone</code></td><td>写 unix 时间或时区</td></tr>
-    <tr><td><code>sys_param_reset</code></td><td>恢复默认，但保留原来的 SN，桩号写成这份 SN，uniqueID 写成当前芯片</td></tr>
+    <tr><td><code>user_event_check</code></td><td>100 ms。看到 <code>save_config</code> 就清标志，调用 <code>sys_param_set</code> 和 <code>sec_param_store</code>。升级成功置的就是这个标志</td></tr>
   </table>
-  <div class="note">下载成功后程序把 <code>fw_update_state</code> 改成 1 或 11，并置 <code>user_event.save_config</code>。全工程只有这几处赋值，没有读这个标志再调用 <code>sys_param_set</code> 的代码。升级状态要落盘，得靠后面另一次 <code>sys_param_set</code> 把整个结构体写进去。</div>
+  <div class="note">下载成功后把 <code>fw_update_state</code> 改成 1 或 11，并置 <code>save_config</code>。100 ms 的 <code>user_event_check</code> 看到这个标志就调用 <code>sys_param_set</code>，所以升级状态会落盘。</div>
 </section>
 <section>
   <h2>4. 字段、默认值、合法范围</h2>

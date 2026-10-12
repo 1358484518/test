@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>程序执行顺序</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <h1>从头到尾：移植时按这个顺序实现</h1>
+  <p>这一页是总纲。别的板子只要按表里的输入、输出和规则做，行为就能对齐。细节阈值在对应章节，不要只看本页就改数字。</p>
+</header>
+<nav class="top">
+  <a href="index.html">目录</a>
+  <a href="flow.html">总纲</a>
+  <a href="charge.html">充电</a>
+  <a href="output.html">输出</a>
+  <a href="protect.html">保护</a>
+  <a href="auth.html">授权</a>
+  <a href="rs485.html">485</a>
+  <a href="ocpp.html">OCPP</a>
+  <a href="network.html">网络</a>
+  <a href="energy.html">负载</a>
+  <a href="param.html">参数</a>
+  <a href="upgrade.html">升级</a>
+  <a href="system.html">差异</a>
+</nav>
+<main>
+<section>
+  <h2>0. 上电，进入 while(1) 之前</h2>
+  <table>
+    <tr><th>顺序</th><th>调用</th><th>必须先有的结果</th></tr>
+    <tr><td>1</td><td>时钟、GPIO、ADC、SPI（外部 Flash、W5500）、定时器</td><td>TIM3：CP 1 kHz，周期 999。TIM4：电子锁。TIM1/TIM8：交流接触器两路 10 kHz。TIM16：蜂鸣器。TIM2：灯</td></tr>
+    <tr><td>2</td><td>串口</td><td>USART3 WiFi/蓝牙 AT。USART2 485 收。UART9 4G。USART1 RFID。USART10 调试/PLC</td></tr>
+    <tr><td>3</td><td>看门狗、界面初始化</td><td></td></tr>
+    <tr><td>4</td><td><code>ParamBlock_init</code> 然后 <code>DEV_Init</code>、<code>APP_Init</code></td><td>从三份 Flash 选出参数。<code>APP_Init</code> 里：网络、智能充电、RFID、<code>OCPP_Init</code>（Boot 标志和定时器）</td></tr>
+    <tr><td>5</td><td>灯</td><td>模式 1 黄灯，否则蓝灯。长鸣一声</td></tr>
+  </table>
+</section>
+<section>
+  <h2>1. 主循环：谁在什么节拍跑</h2>
+  <table>
+    <tr><th>节拍</th><th>函数</th><th>移植时要保证的行为</th><th>详细页</th></tr>
+    <tr><td>每圈</td><td><code>adc2_data_process</code></td><td>50 Hz 采样推进。CP/电压/电流/温度都从这里来</td><td>保护</td></tr>
+    <tr><td>1 ms</td><td><code>timer_loop</code></td><td>软件定时器。心跳、电量、Boot 重发都挂在这上面</td><td>OCPP</td></tr>
+    <tr><td>1 ms</td><td><code>Charging_task</code></td><td>故障扫描 → 状态机 → PWM → 接触器 → 灯。状态函数只改允许位</td><td>充电、输出</td></tr>
+    <tr><td>1 ms</td><td><code>SIM_Task</code></td><td>4G 未使能则空。否则先把模组送到 SIM_LOOP，再为主连接建 TCP，管理平台打开再轮第二路。主控升级中直接返回</td><td>本页第 4 节</td></tr>
+    <tr><td>5 ms</td><td><code>rcm_selftest</code></td><td>漏电模块自检。准备态进充电前必须成功一次</td><td>保护</td></tr>
+    <tr><td>5 ms</td><td><code>OCPP_Task</code></td><td>链路通且重连倒计时为 0 才握手；握手成功才发报文；末尾跑升级和诊断上传</td><td>OCPP、升级</td></tr>
+    <tr><td>5 ms</td><td><code>LAN_Manager</code></td><td>W5500 和网页，含 <code>/firmware.cgi</code></td><td>升级</td></tr>
+    <tr><td>5 ms</td><td><code>wifi_ble_task</code></td><td>BW20：先 WiFi AT 再蓝牙 AT，同一时刻只一条命令。测试模式改走旧的 <code>esp32_process</code></td><td>网络</td></tr>
+    <tr><td>5 ms</td><td><code>net_process</code></td><td>按已连通的接口在 LAN、WiFi、4G 间切换；wss 走主芯片 TLS</td><td>网络</td></tr>
+    <tr><td>5 ms</td><td><code>RS485_slave_process</code></td><td>DLB 从机。拨码在电表侧或 <code>dlb_mode==0</code> 时不工作</td><td>485</td></tr>
+    <tr><td>10 ms</td><td>GPIO、RFID、CP 计算</td><td>刷卡、CP 12/9/6 V 分档、插枪标志</td><td>授权、充电</td></tr>
+    <tr><td>100 ms</td><td><code>user_process</code></td><td>即插即充、蜂鸣、重启、把 <code>save_config</code> 落盘</td><td>本页第 2 节</td></tr>
+    <tr><td>100 ms</td><td>电表、家庭负载、光伏、离线自动充电</td><td>电表只在拨码电表侧跑</td><td>485、负载</td></tr>
+    <tr><td>500 ms</td><td>充电计划、NTC</td><td>计划电流进 PWM 合成</td><td>负载</td></tr>
+    <tr><td>1 s</td><td>相数、授权缓存、界面</td><td>三相硬件下只有 A 相有电才当成单相</td><td>充电</td></tr>
+    <tr><td>5 s</td><td><code>dlb_current_ctrl</code></td><td>DLB 电流每 5 秒最多加 1A，减则立刻</td><td>485</td></tr>
+  </table>
+  <p>测试模式 <code>sys_test_mode</code> 为真时，循环只跑 ADC、定时器、旧 ESP32 处理和灯，不跑上表。</p>
+</section>
+<section>
+  <h2>2. 100 ms 用户任务：即插即充、蜂鸣、重启、存参数</h2>
+  <table>
+    <tr><th>函数</th><th>规则</th></tr>
+    <tr><td><code>user_auto_charge_check</code></td><td>仅 <code>chargemode==3</code> 或安装测试模式。上电 8.5 秒内返回。等待态：未插枪则清故障停机标志；已插枪且强制键按下，或插枪已超过 1 秒且没有“按键结束”标志、没有故障停机，则 <code>on_charging=1</code>，idTag 为 <code>freeIdTag</code>。充电、暂停、结束时按键把授权清掉，原因 Local，并置“按键结束”，拔枪前不再自动开</td></tr>
+    <tr><td><code>user_beep_check</code></td><td>把各处置的蜂鸣标志变成定时器输出</td></tr>
+    <tr><td><code>user_event_check</code></td><td>未插枪、曾经连上过网、距上次网络活动超过 60 分钟，连续约 3 秒（30 次）后 <code>NVIC_SystemReset</code>。<code>system_reboot</code> 约 1 秒后复位。<code>system_dealy_reboot</code> 且不是软复位正常标志时，约 10 秒后复位。<code>save_config</code> 置位则清掉并调用 <code>sys_param_set</code> 与 <code>sec_param_store</code></td></tr>
+  </table>
+<pre><code>/* 模式 3，等待态，已插枪超过 1 秒 */
+charge_handle.on_charging = 1;
+strcpy(charge_handle.idTag, ChargingPointFreeIdTag);</code></pre>
+</section>
+<section>
+  <h2>3. 充电这条链，移植时不要拆开</h2>
+  <p>顺序固定，不能先合接触器再算电流。</p>
+  <ol>
+    <li>采样得到 CP 档位和 <code>bChargerConnect</code>。</li>
+    <li>刷卡、远程、蓝牙、光伏、离线超时、即插即充，只改 <code>on_charging</code> 和 idTag。</li>
+    <li>1 ms 状态机：授权且插枪才从等待进准备；准备里 CP 为 6V、电流≥6A、满 600 ms、二极管通过、漏电自检成功，才进充电。</li>
+    <li>同一次调用末尾 <code>set_current_proc</code> 合成电流，<code>set_contactor_proc</code> 才允许吸合。</li>
+    <li>状态变化由 OCPP 任务在握手成功后发 StatusNotification / Start / Stop / MeterValues。</li>
+  </ol>
+  <p>故障返回 1 停机进结束或故障；返回 2 告警在准备和充电里进暂停；返回 3 只亮紫灯。表在<a href="protect.html">保护</a>。</p>
+</section>
+<section>
+  <h2>4. 4G，之前没有单独写</h2>
+  <table>
+    <tr><th>状态</th><th>行为</th></tr>
+    <tr><td>未使能 <code>NET_INTF_4G</code></td><td><code>SIM_process</code> 直接返回</td></tr>
+    <tr><td>0</td><td><code>SIM_Init</code>：账号、密码、APN 来自参数。模组进入 SIM_LOOP 后清两路 TCP 标志，转到 1</td></tr>
+    <tr><td>1</td><td><code>sim_tcp_proc(主连接)</code>。返回 0 且管理平台打开，转到 2</td></tr>
+    <tr><td>2</td><td>第二路 TCP，完成后回到 1，两路轮流</td></tr>
+    <tr><td>主控 <code>fw_update</code></td><td>初始化完成后的 TCP 不再推进</td></tr>
+    <tr><td>模组 FOTA</td><td><code>sim_ota_flag==1</code> 且桩在等待、故障或不可用，OCPP 空闲，再等约 2 秒，调用 <code>quectel_fota</code></td></tr>
+  </table>
+  <p>OCPP 字节是否走 4G，由 <code>net_interface</code> 决定，不由 4G 任务自己决定。有线或 WiFi 已连通时，网络切换会把接口从 4G 拉走。</p>
+</section>
+<section>
+  <h2>5. 移植时各章对应的实现边界</h2>
+  <table>
+    <tr><th>要重写的模块</th><th>对外接口（别的模块只依赖这些）</th><th>页</th></tr>
+    <tr><td>参数</td><td><code>sys_param_get/set</code>，三份 Flash，校验失败禁止写</td><td><a href="param.html">参数</a></td></tr>
+    <tr><td>充电状态</td><td><code>CHARGE_STATE</code>、<code>on_charging</code>、<code>pwm_enable</code>、<code>contactor_enable</code></td><td><a href="charge.html">充电</a></td></tr>
+    <tr><td>CP PWM</td><td><code>pwm_current</code>，0 则占空比 100%，否则 IEC 公式，上限 63A</td><td><a href="output.html">输出</a></td></tr>
+    <tr><td>保护</td><td>返回 0/1/2/3 和故障码</td><td><a href="protect.html">保护</a></td></tr>
+    <tr><td>授权</td><td>只改 <code>on_charging</code> 和 idTag</td><td><a href="auth.html">授权</a></td></tr>
+    <tr><td>485</td><td>电表填计量；DLB 改 <code>dlb_current</code>；调试命令改参数</td><td><a href="rs485.html">485</a></td></tr>
+    <tr><td>OCPP</td><td>握手后按标志发 JSON；平台 Call 改参数或授权</td><td><a href="ocpp.html">OCPP</a></td></tr>
+    <tr><td>网络</td><td>一条 AT 串口；<code>tcp_connected</code> 为真才允许 OCPP</td><td><a href="network.html">网络</a></td></tr>
+    <tr><td>负载</td><td>只改 <code>dlm_current</code>、<code>solar_current</code>、<code>sc_maxcurrent</code></td><td><a href="energy.html">负载</a></td></tr>
+    <tr><td>升级</td><td>下载到外部 Flash，写 <code>0x1234ABCD</code>，重启后上报 2/3</td><td><a href="upgrade.html">升级</a></td></tr>
+  </table>
+  <p><a href="index.html">返回目录</a></p>
+</section>
+</main>
+</body>
+</html>
