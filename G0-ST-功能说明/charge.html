@@ -64,6 +64,34 @@ set_led_proc();</code></pre>
   </ul>
   <p>插枪沿变化时记下 <code>ev_connect_tick</code>，并允许 PE 接触器。拔枪沿记下断开时刻，并清电子锁失败标志。光伏和离线自动充电都要求插枪超过 3 秒才启动，用的就是这个时刻。</p>
 </section>
+<section id="pp">
+  <h2>1.2A PP：枪线额定电流</h2>
+  <p>PP 是电缆侧电阻分压，用来识别这根线允许多大电流。只有枪线产品才启用：<code>DEV_Init</code> 里 <code>CONNECTOR_TYPE == 0</code> 时 <code>pp_charge_enable = 1</code>，枪座（<code>CONNECTOR_TYPE != 0</code>）为 0。为 0 时 <code>StateSwitch_PP_Check</code> 直接返回，不改 <code>charge_param.PP</code>，插枪只看 CP，PWM 不按 PP 限流，电子锁函数也直接返回。</p>
+  <p><code>adc_handle.PPVolt</code> 单位是 0.1V。故障扫描里每次调用 <code>StateSwitch_PP_Check</code>。63A 那一档整段被注释掉了，所以现在只有三档加上“未插枪”。</p>
+  <table>
+    <tr><th>PPVolt</th><th>约等于电压</th><th>注释里的电阻</th><th><code>charge_param.PP</code></th></tr>
+    <tr><td>16～22</td><td>1.6～2.2V（注释 1.98V）</td><td>1500Ω</td><td>13A</td></tr>
+    <tr><td>9～15</td><td>0.9～1.5V（注释 1.33V）</td><td>680Ω</td><td>20A</td></tr>
+    <tr><td>2～8</td><td>0.2～0.8V（注释 0.59V）</td><td>220Ω</td><td>32A</td></tr>
+    <tr><td>其余，含注释里的 100Ω/0.30V</td><td>不在上面三个窗口</td><td>63A 判断被注释</td><td><code>PP_NOPLUG</code>（0）</td></tr>
+  </table>
+<pre><code>if (adc_handle.PPVolt &gt;= 16 &amp;&amp; adc_handle.PPVolt &lt;= 22)
+    PP = 13A;
+else if (adc_handle.PPVolt &gt;= 9 &amp;&amp; adc_handle.PPVolt &lt;= 15)
+    PP = 20A;
+else if (adc_handle.PPVolt &gt;= 2 &amp;&amp; adc_handle.PPVolt &lt; 9)
+    PP = 32A;
+else
+    PP = PP_NOPLUG;</code></pre>
+  <table>
+    <tr><th>PP 结果用在哪</th><th>规则</th></tr>
+    <tr><td>插枪</td><td><code>pp_charge_enable</code> 为 1 且 PP 为未插枪时，强制 <code>bChargerConnect = 0</code>，即使 CP 已是 9V 或 6V</td></tr>
+    <tr><td>充电中突然变成未插枪</td><td>置 <code>CP_abnormal</code>，按停机类故障处理</td></tr>
+    <tr><td>PWM 电流</td><td><code>set_current_proc</code> 里，合成电流不超过 PP 的安培数（13、20 或 32）</td></tr>
+    <tr><td>过流门槛</td><td>过流比较用的限值取额定电流和 PP 中较小的一个；PP 为未插枪时不用 PP</td></tr>
+    <tr><td>电子锁</td><td>枪线才跑 <code>set_lock_proc</code>。上电后先空等约 3 秒</td></tr>
+  </table>
+</section>
 <section id="authbit">
   <h2>1.3 授权位</h2>
   <p><code>on_charging</code> 是“允许开始或继续这次充电”的开关，不是“接触器已经合上”。等待态只有它为 1，并且 <code>check_start_charge_condition</code> 看到已经插枪，才切到准备。</p>
