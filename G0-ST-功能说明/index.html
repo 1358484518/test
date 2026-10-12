@@ -8,22 +8,16 @@
 <body>
 <header>
   <h1>G0-ST 程序功能说明</h1>
-  <p>对照《G0-交流充电桩功能清单》，按当前 G0-ST-src 源码写程序实际怎么跑。打开本页后，从目录进各章。清单口径和源码不一致的地方见最后一章。</p>
+  <p>按六类读：基本充电、安全检测、联网、OCPP、参数存储，以及上面没归进去的功能。每类下面是子功能，点进去是按源码写的条件和动作。</p>
 </header>
 <nav class="top">
   <a href="index.html">目录</a>
-  <a href="flow.html">总纲</a>
-  <a href="charge.html">充电</a>
-  <a href="output.html">输出</a>
-  <a href="protect.html">保护</a>
-  <a href="auth.html">授权</a>
-  <a href="rs485.html">485</a>
-  <a href="ocpp.html">OCPP</a>
-  <a href="network.html">网络</a>
-  <a href="energy.html">负载</a>
-  <a href="param.html">参数</a>
-  <a href="upgrade.html">升级</a>
-  <a href="system.html">差异</a>
+  <a href="charge.html">1 充电</a>
+  <a href="protect.html">2 安全</a>
+  <a href="network.html">3 联网</a>
+  <a href="ocpp.html">4 OCPP</a>
+  <a href="param.html">5 参数</a>
+  <a href="other.html">6 其他</a>
 </nav>
 <main>
 <section>
@@ -41,38 +35,43 @@
   <p>充电能不能开始，不由这一节拍直接决定，而由 <code>on_charging</code> 这个授权位决定。刷卡、远程启动、蓝牙、光伏和离线超时都会去改它。状态机每 1 ms 看到它为 1 且已经插枪，才从等待进准备。</p>
 </section>
 <section>
-  <h2>目录</h2>
+  <h2>六类目录</h2>
   <div class="toc">
-    <a href="flow.html"><b>0. 执行顺序（移植先看）</b> — 上电、主循环、即插即充、4G、各模块边界</a>
-    <a class="l2" href="charge.html#task">1.1 每毫秒任务的顺序</a>
-    <a class="l2" href="charge.html#plug">1.2 怎样算插上枪</a>
-    <a class="l2" href="charge.html#pp">1.2A PP 电压分档和限流</a>
-    <a class="l2" href="charge.html#authbit">1.3 授权位谁置位、谁清除</a>
-    <a class="l2" href="charge.html#states">1.4 八个状态</a>
-    <a class="l3" href="charge.html#wait">等待 / 准备 / 充电 / 暂停 / 结束 / 故障 / 预约 / 不可用</a>
-    <a class="l2" href="charge.html#stop">1.5 停止原因和报给平台的状态</a>
+    <a href="charge.html"><b>1. 基本充电功能</b></a>
+    <a class="l2" href="charge.html#task">1.1 状态机每毫秒做什么，八个状态怎么转</a>
+    <a class="l2" href="charge.html#plug">1.2 CP 分档和怎样算插枪</a>
+    <a class="l2" href="charge.html#pp">1.3 PP 电压分档、限流、枪线才上锁</a>
+    <a class="l2" href="charge.html#authbit">1.4 谁把授权位置 1：刷卡、远程、即插即充、光伏、离线</a>
+    <a class="l2" href="auth.html">1.5 三种充电模式和刷卡细则</a>
+    <a class="l2" href="output.html">1.6 CP 占空比、接触器、电子锁、灯</a>
+    <a class="l2" href="energy.html">1.7 电流从哪裁：家庭负载、光伏、充电计划、DLB</a>
 
-    <a href="output.html"><b>2. 输出</b> — 电流合成、CP 占空比、接触器、电子锁、灯</a>
-    <a class="l2" href="output.html#current">2.1 电流上限的先后顺序</a>
-    <a class="l2" href="output.html#duty">2.2 占空比公式和零电流时的 CP</a>
-    <a class="l2" href="output.html#relay">2.3 接触器吸合与延时断开</a>
-    <a class="l2" href="output.html#lock">2.4 电子锁</a>
-    <a class="l2" href="output.html#led">2.5 灯和蜂鸣器</a>
+    <a href="protect.html"><b>2. 各个安全检测</b></a>
+    <a class="l2" href="protect.html#class">2.1 返回 1 停机、返回 2 暂停、返回 3 只亮灯</a>
+    <a class="l2" href="protect.html#items">2.2 过温、过欠压、接地、漏电、二极管、锁、电表、防拆</a>
 
-    <a href="protect.html"><b>3. 保护</b> — 停机、告警、只亮灯，以及每一项怎么置位</a>
-    <a href="auth.html"><b>4. 授权与计量</b> — 三种充电模式、刷卡、远程、电表</a>
-    <a href="rs485.html"><b>5. RS485</b> — 同一根线：电表主机、DLB 从机、调试命令</a>
-    <a class="l2" href="rs485.html">5.1 拨码怎么分流</a>
-    <a class="l2" href="rs485.html">5.2 电表识别和轮询</a>
-    <a class="l2" href="rs485.html">5.3 DLB 功能码 0x10 / 0x06</a>
-    <a class="l2" href="rs485.html">5.4 产测和校准命令</a>
-    <a href="ocpp.html"><b>6. OCPP</b> — 链路、桩主动发的报文、平台下发</a>
-    <a href="network.html"><b>7. 网络与蓝牙</b> — 串口分时、建链、蓝牙连接与 AES 认证</a>
-    <a class="l2" href="network.html#bt">7.4 连接命令、会话密钥、密码</a>
-    <a href="energy.html"><b>8. 负载、光伏、充电计划</b></a>
-    <a href="param.html"><b>9. 参数存储</b> — 每个参数控制什么，以及内外 Flash 地址</a>
-    <a href="upgrade.html"><b>10. 升级</b> — 下载状态机、失败码、写标志</a>
-    <a href="system.html"><b>11. 和清单的差异</b></a>
+    <a href="network.html"><b>3. 联网功能</b></a>
+    <a class="l2" href="network.html#share">3.1 WiFi 和蓝牙共用一条 AT 串口</a>
+    <a class="l2" href="network.html#wifi">3.2 WiFi 怎样把 OCPP 的 TCP 连上</a>
+    <a class="l2" href="network.html#switch">3.3 有线、WiFi、4G 怎么切换；4G 模组状态机见<a href="flow.html">总纲</a></a>
+    <a class="l2" href="network.html#bt">3.4 蓝牙连接、会话密钥、密码</a>
+
+    <a href="ocpp.html"><b>4. OCPP 功能</b></a>
+    <a class="l2" href="ocpp.html#link">4.1 何时握手</a>
+    <a class="l2" href="ocpp.html#call">4.2 桩主动发的每一条</a>
+    <a class="l2" href="ocpp.html#reply">4.3 平台下发后桩怎么回</a>
+    <a class="l2" href="ocpp.html#offline">4.4 断网补传和第二路</a>
+
+    <a href="param.html"><b>5. 参数存储功能</b></a>
+    <a class="l2" href="param.html">5.1 内部 Flash 与外部 W25Q 各地址存什么</a>
+    <a class="l2" href="param.html">5.2 三份备份、CRC、何时允许写</a>
+    <a class="l2" href="param.html">5.3 每个参数控制什么；没被主流程读取的字段</a>
+
+    <a href="other.html"><b>6. 上面没归进去的</b></a>
+    <a class="l2" href="rs485.html">6.1 RS485：电表、DLB、产测命令</a>
+    <a class="l2" href="upgrade.html">6.2 主控升级、网页升级、模组 OTA</a>
+    <a class="l2" href="other.html#reboot">6.3 重启、存参数、界面、测试模式</a>
+    <a class="l2" href="system.html">6.4 和功能清单不一致的地方</a>
   </div>
 </section>
 </main>

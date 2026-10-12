@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>6. 未归入前五类的功能</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <h1>6. 上面五类没写完的功能</h1>
+  <p>充电、安全、联网、OCPP、参数存储之外，程序里还有这些独立功能。细节表在对应页，这里写清它们干什么、什么时候跑。</p>
+</header>
+<nav class="top">
+  <a href="index.html">目录</a>
+  <a href="charge.html">1 充电</a>
+  <a href="protect.html">2 安全</a>
+  <a href="network.html">3 联网</a>
+  <a href="ocpp.html">4 OCPP</a>
+  <a href="param.html">5 参数</a>
+  <a href="other.html">6 其他</a>
+</nav>
+<main>
+<section>
+  <h2>6.1 RS485</h2>
+  <p>完整分档和命令表在 <a href="rs485.html">RS485</a>。移植时记住一根线三件事，由拨码 <code>bcd3</code> 决定：</p>
+  <ul>
+    <li>拨码为电表侧：桩是 Modbus 主机，读东鸿或 BG 电表，地址和波特率来自 <code>meter_address</code>、<code>meter_baudrate</code>。30 秒认不到表就报电表故障。</li>
+    <li>拨码为 DLB 侧且 <code>dlb_mode==1</code>：桩是从机地址 0x01，收功能码 0x10 或 0x06，只把允许电流改小。60 秒无帧则电流 6A，故障码 13，紫灯，不停充。</li>
+    <li>没被 Modbus 吃掉的字节进调试命令：产测 <code>Master-&gt;Check_*</code>、校准 <code>ENTER_CAL</code>、改参数 <code>ParameterSet</code>、把字符串转发给 4G/WiFi 的 <code>4GAT:</code> / <code>WIFIAT:</code>。</li>
+  </ul>
+  <p>方向脚宏是空的，程序不翻转 485 收发使能。接收在 USART2，发送函数仍调用 USART6。</p>
+</section>
+<section>
+  <h2>6.2 升级</h2>
+  <p>步骤、失败码和 Flash 地址在 <a href="upgrade.html">升级</a>。和前五类的边界是：升级不改变充电状态机本身，它把桩标成不可用，把固件写到外部 Flash <code>0x00001000</code>，在 <code>0x00000000</code> 写 <code>0x1234ABCD</code>，然后重启。Boot 负责搬进内部 Flash。应用下次上电用 <code>fw_update_state</code> 决定报 Installed 还是 InstallationFailed。</p>
+  <p>另外三条不要和主控升级混在一起：地址以 <code>WIFI-OTA-URL:</code> 开头只升级 WiFi 模组；<code>sim_ota_flag</code> 走 4G 模组 FOTA；蓝牙升级函数在，命令表被注释，正常会话进不去。网页 <code>/firmware.cgi</code> 写同一块外部 Flash。</p>
+</section>
+<section id="reboot">
+  <h2>6.3 重启、存参数、界面、测试模式</h2>
+  <table>
+    <tr><th>功能</th><th>何时发生</th><th>做什么</th></tr>
+    <tr><td>立即重启</td><td><code>system_reboot==1</code>，100 ms 任务里数到约 1 秒</td><td><code>NVIC_SystemReset</code>。网页保存、蓝牙退出且改过参数、部分调试命令会置这个标志</td></tr>
+    <tr><td>延时重启</td><td><code>system_dealy_reboot==1</code> 且不是软复位正常标志，约 10 秒</td><td>固件 CRC 通过后置这个标志，给状态上报留时间</td></tr>
+    <tr><td>断网空闲重启</td><td>未插枪，曾经连上过平台，距上次网络活动超过 60 分钟，再连续约 3 秒</td><td>整机复位。这和 WiFi 模组 20 分钟无数据就 <code>AT+RST</code> 是两回事</td></tr>
+    <tr><td>保存参数</td><td><code>save_config==1</code></td><td>100 ms 任务清标志，调用 <code>sys_param_set</code> 和 <code>sec_param_store</code></td></tr>
+    <tr><td>界面</td><td>每 1 秒 <code>update_GUI</code></td><td>刷新 LCD 上的状态。不能触摸，没有用屏幕改参数的菜单</td></tr>
+    <tr><td>蜂鸣</td><td><code>user_beep_check</code>，100 ms</td><td>把刷卡、故障、远程启停置的标志变成 TIM16 输出</td></tr>
+    <tr><td>测试模式</td><td><code>sys_test_mode</code> 或调试命令 <code>TEST_MODE_ENABLE</code></td><td>主循环不再跑充电和 OCPP，只跑 ADC、定时器和旧的 ESP32 处理</td></tr>
+    <tr><td>看门狗</td><td>上电 <code>MX_IWDG_Init</code></td><td>网页升级的长循环里会喂狗。移植时主循环不能长时间停在不喂狗的路径上</td></tr>
+  </table>
+</section>
+<section>
+  <h2>6.4 和清单不一致</h2>
+  <p>产品清单里标成不支持或待定、但源码已经做了的，以及清单写支持但源码没有报文的，集中在 <a href="system.html">差异表</a>。移植时以源码行为为准，不要按清单的“是否支持”列删功能。</p>
+  <p><a href="index.html">返回六类目录</a></p>
+</section>
+</main>
+</body>
+</html>
