@@ -54,12 +54,107 @@ static void MX_GPIO_Init(void);
 static void MX_ICACHE_Init(void);
 static void MX_USART1_UART_Init(void);
 /* USER CODE BEGIN PFP */
-
+void USART1_Init(void);
+HAL_StatusTypeDef HAL_USART1_Transmit(const uint8_t *data, uint16_t len, uint32_t timeout);
+HAL_StatusTypeDef HAL_USART1_SendString(const char *str);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+static void CPU_DelayMs(uint32_t ms)
+{
+  uint32_t count = (SystemCoreClock / 4000U) * ms;
 
+  while (count-- > 0U)
+  {
+    __NOP();
+  }
+}
+
+void USART1_Init(void)
+{
+  GPIO_InitTypeDef gpio = {0};
+  RCC_PeriphCLKInitTypeDef clk = {0};
+  uint32_t pclk2;
+
+  SystemCoreClockUpdate();
+
+  clk.PeriphClockSelection = RCC_PERIPHCLK_USART1;
+  clk.Usart1ClockSelection = RCC_USART1CLKSOURCE_PCLK2;
+  if (HAL_RCCEx_PeriphCLKConfig(&clk) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  __HAL_RCC_USART1_FORCE_RESET();
+  __HAL_RCC_USART1_RELEASE_RESET();
+  __HAL_RCC_USART1_CLK_ENABLE();
+  __HAL_RCC_GPIOA_CLK_ENABLE();
+
+  gpio.Pin = GPIO_PIN_9;
+  gpio.Mode = GPIO_MODE_AF_PP;
+  gpio.Pull = GPIO_NOPULL;
+  gpio.Speed = GPIO_SPEED_FREQ_LOW;
+  gpio.Alternate = GPIO_AF7_USART1;
+  HAL_GPIO_Init(GPIOA, &gpio);
+
+  pclk2 = HAL_RCC_GetPCLK2Freq();
+  if (pclk2 == 0U)
+  {
+    Error_Handler();
+  }
+
+  USART1->CR1 = 0U;
+  USART1->CR2 = 0U;
+  USART1->CR3 = 0U;
+  USART1->PRESC = 0U;
+  USART1->ICR = 0xFFFFFFFFU;
+  USART1->BRR = (uint16_t)UART_DIV_SAMPLING16(pclk2, 115200U, UART_PRESCALER_DIV1);
+  USART1->CR1 = USART_CR1_UE | USART_CR1_TE;
+
+  /* Sync HAL handle after register init. Skip HAL_UART_Init() TEACK wait. */
+  huart1.Instance = USART1;
+  huart1.Init.BaudRate = 115200U;
+  huart1.Init.WordLength = UART_WORDLENGTH_8B;
+  huart1.Init.StopBits = UART_STOPBITS_1;
+  huart1.Init.Parity = UART_PARITY_NONE;
+  huart1.Init.Mode = UART_MODE_TX;
+  huart1.Init.HwFlowCtl = UART_HWCONTROL_NONE;
+  huart1.Init.OverSampling = UART_OVERSAMPLING_16;
+  huart1.Init.OneBitSampling = UART_ONE_BIT_SAMPLE_DISABLE;
+  huart1.Init.ClockPrescaler = UART_PRESCALER_DIV1;
+  huart1.gState = HAL_UART_STATE_READY;
+  huart1.RxState = HAL_UART_STATE_READY;
+  huart1.Lock = HAL_UNLOCKED;
+  huart1.ErrorCode = HAL_UART_ERROR_NONE;
+}
+
+HAL_StatusTypeDef HAL_USART1_Transmit(const uint8_t *data, uint16_t len, uint32_t timeout)
+{
+  if ((data == NULL) || (len == 0U))
+  {
+    return HAL_ERROR;
+  }
+
+  return HAL_UART_Transmit(&huart1, data, len, timeout);
+}
+
+HAL_StatusTypeDef HAL_USART1_SendString(const char *str)
+{
+  uint16_t len = 0U;
+
+  if (str == NULL)
+  {
+    return HAL_ERROR;
+  }
+
+  while (str[len] != '\0')
+  {
+    len++;
+  }
+
+  return HAL_USART1_Transmit((const uint8_t *)str, len, 1000U);
+}
 /* USER CODE END 0 */
 
 /**
@@ -95,12 +190,11 @@ int main(void)
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
   MX_ICACHE_Init();
-  MX_USART1_UART_Init();
   /* USER CODE BEGIN 2 */
-  /* Simple bring-up check once UART_CheckIdleState succeeds */
+  USART1_Init();
+  if (HAL_USART1_SendString("USART1 ready\r\n") != HAL_OK)
   {
-    const uint8_t msg[] = "USART1 OK\r\n";
-    (void)HAL_UART_Transmit(&huart1, (uint8_t *)msg, sizeof(msg) - 1U, 100U);
+    Error_Handler();
   }
   /* USER CODE END 2 */
 
@@ -111,6 +205,11 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
+    if (HAL_USART1_SendString("hello\r\n") != HAL_OK)
+    {
+      Error_Handler();
+    }
+    CPU_DelayMs(500U);
   }
   /* USER CODE END 3 */
 }
@@ -227,28 +326,13 @@ static void MX_USART1_UART_Init(void)
   huart1.Init.WordLength = UART_WORDLENGTH_8B;
   huart1.Init.StopBits = UART_STOPBITS_1;
   huart1.Init.Parity = UART_PARITY_NONE;
-  huart1.Init.Mode = UART_MODE_TX_RX;
+  huart1.Init.Mode = UART_MODE_TX;
   huart1.Init.HwFlowCtl = UART_HWCONTROL_NONE;
   huart1.Init.OverSampling = UART_OVERSAMPLING_16;
   huart1.Init.OneBitSampling = UART_ONE_BIT_SAMPLE_DISABLE;
   huart1.Init.ClockPrescaler = UART_PRESCALER_DIV1;
   huart1.AdvancedInit.AdvFeatureInit = UART_ADVFEATURE_NO_INIT;
-  if (HAL_UART_Init(&huart1) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  if (HAL_UARTEx_SetTxFifoThreshold(&huart1, UART_TXFIFO_THRESHOLD_1_8) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  if (HAL_UARTEx_SetRxFifoThreshold(&huart1, UART_RXFIFO_THRESHOLD_1_8) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  if (HAL_UARTEx_DisableFifoMode(&huart1) != HAL_OK)
-  {
-    Error_Handler();
-  }
+  /* HAL_UART_Init() is replaced by USART1_BringUp() in main() */
   /* USER CODE BEGIN USART1_Init 2 */
 
   /* USER CODE END USART1_Init 2 */
