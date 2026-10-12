@@ -49,10 +49,166 @@
   <p>SecurityEventNotification：防拆上升沿，或 TLS 证书校验失败。类型包括 TamperDetectionActivated、固件签名证书无效、固件签名无效。清单写这项不支持，源码会发。</p>
   <p>收到的 Call 解析失败时回 CallError。WebSocket Ping 不是 OCPP 报文，Boot 已接受且不在下载时按 <code>ocpp_WebSocketPingInterval</code> 发。</p>
 </section>
+<section id="body">
+  <h2>5.2A 每条报文里实际填什么</h2>
+  <p>桩主动报文都是 JSON 数组 <code>[2, UniqueId, 动作名, 载荷]</code>。<code>UniqueId</code> 是十进制字符串，每条加 1，按主连接和管理连接分开计。<code>cJSON_Print</code> 会带换行和缩进，不是紧凑一行。下面只写源码真正放进载荷的字段。</p>
+
+  <h3>BootNotification</h3>
+  <table>
+    <tr><th>字段</th><th>内容</th></tr>
+    <tr><td>chargePointVendor</td><td>拨码 <code>bcd2_state==0</code> 为 <code>Sync Energy</code>，否则 <code>MasterPlug</code>。这和 DataTransfer 用的 <code>energy.sync</code> 不是同一个字符串</td></tr>
+    <tr><td>chargePointModel</td><td>由 bcd2、枪线/插座、<code>phases</code> 决定，见下表</td></tr>
+    <tr><td>chargePointSerialNumber</td><td><code>sys_param.chargerID</code></td></tr>
+    <tr><td>chargeBoxSerialNumber</td><td><code>sys_param.sn</code></td></tr>
+    <tr><td>firmwareVersion</td><td><code>ApplicationVersion</code>，形如 <code>G0-S-</code> 加版本号</td></tr>
+    <tr><td>iccid、imsi</td><td>只有当前接口是 4G（<code>INTF_SIM_EC200</code>）才带，内容是模组读到的 <code>iccid</code>、<code>imsi</code></td></tr>
+  </table>
+  <p><code>meterType</code>、<code>meterSerialNumber</code> 编码函数支持，组包时没有置存在标志，所以不发。</p>
+  <table>
+    <tr><th>bcd2</th><th>枪线还是插座</th><th>相数</th><th>chargePointModel</th></tr>
+    <tr><td>0</td><td>枪线 <code>pp_charge_enable</code></td><td>1 / 3</td><td><code>EVWC2S7G-03</code> / <code>EVWC2S22G-03</code></td></tr>
+    <tr><td>0</td><td>插座</td><td>1 / 3</td><td><code>EVWC2T7G-03</code> / <code>EVWC2T22G-03</code></td></tr>
+    <tr><td>非 0</td><td>枪线</td><td>1 / 3</td><td><code>EVCM3S7-03</code> / <code>EVCM3S22-03</code></td></tr>
+    <tr><td>非 0</td><td>插座</td><td>1 / 3</td><td><code>EVCM3T7-03</code> / <code>EVCM3T22-03</code></td></tr>
+  </table>
+
+  <h3>Heartbeat、Authorize</h3>
+  <p>Heartbeat 载荷是空对象 <code>{}</code>。Authorize 只有 <code>idTag</code>，等于 <code>charge_handle.idTag</code>。平台应答里读 <code>idTagInfo.status</code>（Accepted、Blocked、Expired、Invalid、ConcurrentTx），有则再读 <code>expiryDate</code>、<code>parentIdTag</code>。</p>
+
+  <h3>StatusNotification</h3>
+  <table>
+    <tr><th>字段</th><th>内容</th></tr>
+    <tr><td>connectorId</td><td>0 用 <code>chargestate0</code>，非 0 用 <code>chargestate</code>。0 号是整桩，1 号是这把枪</td></tr>
+    <tr><td>status</td><td>Available、Preparing、Charging、SuspendedEVSE、SuspendedEV、Finishing、Reserved、Unavailable、Faulted</td></tr>
+    <tr><td>errorCode</td><td>先按故障位改写，见下表。没有故障是 <code>NoError</code></td></tr>
+    <tr><td>info</td><td>只有表里写了才带</td></tr>
+    <tr><td>vendorId</td><td>只有落到 OtherError 时带，字符串同 Boot 的厂商名</td></tr>
+    <tr><td>vendorErrorCode</td><td>只有 OtherError 那一档带</td></tr>
+    <tr><td>timestamp</td><td>组包没有置这个字段，发出去没有时间</td></tr>
+  </table>
+  <table>
+    <tr><th>故障位（按这个顺序判断）</th><th>errorCode</th><th>附带文字</th></tr>
+    <tr><td>继电器</td><td>PowerSwitchFailure</td><td>info = <code>Contactor Fault</code></td></tr>
+    <tr><td>粘连</td><td>PowerSwitchFailure</td><td>info = <code>Contactor Welded</code></td></tr>
+    <tr><td>过压</td><td>OverVoltage</td><td>info = <code>Vol:L1 L2 L3</code>，三个数是电压原始值（0.1V）</td></tr>
+    <tr><td>欠压</td><td>UnderVoltage</td><td>同上</td></tr>
+    <tr><td>过流</td><td>OverCurrentFailure</td><td>无 info</td></tr>
+    <tr><td>接地</td><td>GroundFailure</td><td>info = <code>L-N=</code> L1 电压原始值，<code> L-PE=</code> PE 电压原始值</td></tr>
+    <tr><td>过温</td><td>HighTemperature</td><td>无 info</td></tr>
+    <tr><td>电表</td><td>PowerMeterFailure</td><td>两只都超时 <code>MID and DLM meter fault</code>；只 MID <code>MID meter fault</code>；只 DLM <code>DLM meter fault</code></td></tr>
+    <tr><td>其余</td><td>OtherError</td><td>漏电自检失败 <code>RCM selftest failed</code>；漏电 <code>RCD leakage</code>；PEN <code>PE leakage</code>；CP <code>CP abnormal</code>；急停 <code>Emergency stop</code>；防拆 <code>TamperDetectionActivated</code>；都不是则 vendorErrorCode=<code>Unknown</code>，info=<code>FaultCode:</code> 加故障码</td></tr>
+  </table>
+
+  <h3>StartTransaction</h3>
+  <table>
+    <tr><th>字段</th><th>在线</th><th>离线补传</th></tr>
+    <tr><td>connectorId</td><td>固定 1</td><td>记录里的 connectorId</td></tr>
+    <tr><td>idTag</td><td><code>charge_handle.idTag</code></td><td>记录里的 idTag</td></tr>
+    <tr><td>meterStart</td><td><code>charge_handle.meter_start</code>，进入充电时抄的 <code>charge_data.energy</code>，和 MeterValues 电能同一单位 Wh</td><td>记录里的 energy</td></tr>
+    <tr><td>reservationId</td><td><code>reserve_id &gt; 0</code> 才带，带完把内存里的预约号清 0</td><td>记录里有才带</td></tr>
+    <tr><td>timestamp</td><td><code>YYYY-MM-DDTHH:MM:SS.mmmZ</code>，用的是桩上 <code>SystemTime</code>，后缀写死 Z</td><td>记录时间再格式化成同样的串</td></tr>
+  </table>
+  <p>这条报文本身没有 transactionId。发出后把内存里的 <code>transactionId</code> 先写成 -1，等平台 CallResult 里的 <code>transactionId</code> 再写回并落盘。应答在这之前如果已经发出 MeterValues，里面的 transactionId 就是 -1。模式 1 且身份不是 Accepted、也不是本地已授权时，清 <code>on_charging</code>，停止原因记 DeAuthorized。光伏模式打开时，这条被接受后再排队一条 SolarIndicator started。</p>
+
+  <h3>StopTransaction</h3>
+  <table>
+    <tr><th>字段</th><th>内容</th></tr>
+    <tr><td>meterStop</td><td>在线用 <code>charge_handle.meter_stop</code>，离线用记录里的 energy，单位同电能 Wh</td></tr>
+    <tr><td>timestamp</td><td>和 Start 同一套时间格式</td></tr>
+    <tr><td>transactionId</td><td>内存里当前的 <code>charge_handle.transactionId</code></td></tr>
+    <tr><td>reason</td><td>在线总是带。进入准备时先清成 Other，之后第一次 <code>stop_reason_set</code> 锁死，后面的不再覆盖</td></tr>
+    <tr><td>idTag</td><td>在线这条不带。只有离线记录里的 idTag 非空才带</td></tr>
+    <tr><td>transactionData</td><td>编码函数留了空分支，不组这段</td></tr>
+  </table>
+  <table>
+    <tr><th>reason 字符串</th><th>谁写入</th></tr>
+    <tr><td>EVDisconnected</td><td>拔枪，或授权后连接超时还没进准备</td></tr>
+    <tr><td>DeAuthorized</td><td>Authorize 或 StartTransaction 应答拒绝，或无效身份电量超限</td></tr>
+    <tr><td>Local</td><td>本机按键或蓝牙停止</td></tr>
+    <tr><td>Remote</td><td>RemoteStopTransaction</td></tr>
+    <tr><td>Reboot</td><td>硬复位</td></tr>
+    <tr><td>SoftReset</td><td>软复位</td></tr>
+    <tr><td>UnlockCommand</td><td>UnlockConnector</td></tr>
+    <tr><td>PowerLoss</td><td>掉电补记的离线结束记录</td></tr>
+    <tr><td>Other</td><td>没有更早原因时的默认值</td></tr>
+  </table>
+  <p>编码函数还能输出 EmergencyStop、HardReset，当前停止路径没有把原因设成这两项。</p>
+
+  <h3>MeterValues</h3>
+  <p>在线时 <code>connectorId</code> 固定 1。状态是充电、准备或暂停才带 <code>transactionId</code>，否则不带。只有一组 <code>meterValue</code>，时间戳格式同 Start。采样项由 <code>ocpp_MeterValuesSampledData</code> 的位决定，默认开电能、功率、提供电流、电流、电压、温度，关电网电流。没有置 <code>format</code>，所以不发 format 字段。</p>
+  <table>
+    <tr><th>measurand</th><th>value 怎么来</th><th>其余字段</th></tr>
+    <tr><td>Energy.Active.Import.Register</td><td><code>charge_data.energy</code> 无符号整数，单位 Wh</td><td>context = Sample.Periodic</td></tr>
+    <tr><td>Power.Active.Import</td><td><code>charge_data.power / 10</code> 整数，单位写成 W。<code>power</code> 是各相「电压原始值 × 电流原始值」相加。电压原始值上报时除以 10 才是伏，电流原始值除以 100 才是安</td><td>context = Sample.Periodic</td></tr>
+    <tr><td>Current.Offered</td><td><code>charge_handle.pwm_current</code> 整数，单位 A</td><td>context = Other</td></tr>
+    <tr><td>Current.Import</td><td>L1，三相再加 L2、L3。<code>l1_current/100</code>，保留两位，单位 A。在线是否出三相看编译宏 <code>AC_PHASE_NUM==3</code></td><td>context = Sample.Periodic，phase = L1/L2/L3</td></tr>
+    <tr><td>Voltage</td><td>同样按相。<code>l1_voltage/10</code>，保留一位，单位 V</td><td>context = Sample.Periodic，phase = L1/L2/L3</td></tr>
+    <tr><td>Temperature</td><td><code>adc_handle.insideTem</code> 整数。读数 4095 视为无效，这一项不发。单位 Celsius</td><td>context = Sample.Periodic，location = Body</td></tr>
+    <tr><td>GridCurrent</td><td>默认关。打开后 L1 为 <code>GridHomeCurrA/100</code>，保留一位，单位 A。三相看 <code>charge_handle.phases==3</code>，再带 L2、L3</td><td>只有 phase，没有 context</td></tr>
+  </table>
+  <p>离线补传用记录里的 connectorId、energy、power、pwm_current、三相电流电压。电能仍然是 Wh；功率用记录原值，不再除以 10。温度和电网电流离线不补。离线电流电压是否出三相看 <code>charge_handle.phases</code>，不看 <code>AC_PHASE_NUM</code>。</p>
+
+  <h3>DataTransfer（桩发给平台）</h3>
+  <p><code>vendorId</code> 固定宏 <code>ChargingPointVendor</code>，当前是 <code>energy.sync</code>。管理连接直接 return，不发这条。<code>data</code> 多数是字符串；只有 GetSolarClampValue 把 data 组成 JSON 对象。</p>
+  <table>
+    <tr><th>messageId</th><th>data</th></tr>
+    <tr><td>DEBUG_EVENT</td><td>调试事件字符串 <code>ocpp_debug_event</code></td></tr>
+    <tr><td>GetCTClampValue</td><td>单相：<code>{"current":电网电流原始值×10,"voltage":L1电压原始值×100}</code>。三相把键写成 <code>L1.Current</code>、<code>L1.Voltage</code>、<code>L2.Current</code>、<code>L2.Voltage</code>、<code>L3.Current</code>、<code>L3.Voltage</code>，倍数相同。若 <code>ocpp_GetCTClampValue==2</code>，这条发出后类型改成 3，应答回来再发 GetSolarClampValue</td></tr>
+    <tr><td>GetSolarClampValue</td><td>JSON 对象，不是字符串：<code>current</code> = <code>SolarCurr×10</code>，<code>voltage</code> = L1 电压原始值×100</td></tr>
+    <tr><td>SolarIndicator</td><td>开始：<code>connectorId</code> 1，<code>transactionId</code>，<code>solar</code>=<code>started</code>，<code>solarEnergy</code>，<code>timestamp</code>。结束把 solar 写成 <code>stopped</code></td></tr>
+    <tr><td>SolarMeterValue</td><td>结构模仿 MeterValues。measurand 为 <code>Solar.Energy.Active.Import.Register</code>（Wh，<code>solar_energy</code>）、<code>Solar.Power.Active.Import</code>（W，<code>solar_power</code>）、<code>Solar.Current.Offered</code>（A，<code>solar_current</code>）、<code>Solar.Current.Import</code>（A，太阳能电流/100，单相只有 L1，三相再加 L2、L3）</td></tr>
+  </table>
+  <p>三相 SolarMeterValue 的源码在 L1、L2、L3 三个对象之间少了逗号，发出去的 data 字符串不是合法 JSON。</p>
+
+  <h3>固件、诊断、安全事件</h3>
+  <table>
+    <tr><th>报文</th><th>载荷</th></tr>
+    <tr><td>FirmwareStatusNotification</td><td>只有 <code>status</code>：Downloaded、DownloadFailed、Downloading、Idle、InstallationFailed、Installing、Installed。下载任务会把状态设成 Downloading、DownloadFailed、Downloaded；启动后成功是 Installed，失败是 InstallationFailed；平台收下 Downloaded 后改成 Installing</td></tr>
+    <tr><td>SignedFirmwareStatusNotification</td><td>同样先有这 7 个 status，数值和普通固件枚举的前 7 项对齐，所以下载过程用普通枚举赋值时，签名报文打出来的字符串相同。编码函数还能打出 DownloadScheduled、DownloadPaused、InstallRebooting、InstallScheduled、<code>InstallVerficationFailed</code>（源码少一个 i）、InvalidSignature、SignatureVerified，当前状态机没有设成这些值。<code>requestId</code> 赋了升级请求号，但 <code>requestId_exist</code> 被写成 0，JSON 里不带 requestId</td></tr>
+    <tr><td>DiagnosticsStatusNotification</td><td>只有 <code>status</code>：Idle、Uploaded、UploadFailed、Uploading</td></tr>
+    <tr><td>SecurityEventNotification</td><td><code>type</code> 为 TamperDetectionActivated、InvalidFirmwareSigningCertificate、InvalidFirmwareSignature。未知类型发一个空格。<code>timestamp</code> 是 <code>YYYY-MM-DDTHH:MM:SSZ</code>，没有毫秒。不带 techInfo</td></tr>
+  </table>
+</section>
 <section id="reply">
   <h2>5.3 平台下发</h2>
   <p>桩回复 CallResult 的有：CancelReservation、ChangeAvailability、ChangeConfiguration、ClearCache、ClearChargingProfile、DataTransfer、GetCompositeSchedule、GetConfiguration、GetDiagnostics、GetLocalListVersion、RemoteStartTransaction、RemoteStopTransaction、ReserveNow、Reset、SendLocalList、SetChargingProfile、TriggerMessage、UnlockConnector、UpdateFirmware、SignedUpdateFirmware。格式不对回 CallError。</p>
   <p>TriggerMessage 只接受 Boot、心跳、MeterValues、StatusNotification。改可用状态、预约会去改充电状态机里的不可用标志和预约标志。改配置经过 <code>ParamCheck</code>，不合法的值不写入。下发的充电计划进 Flash，由<a href="energy.html">负载一章</a>的 500 ms 任务变成电流上限。</p>
+  <h3>GetConfiguration 空键时回的整表</h3>
+  <p>平台不带 key，或 key 个数为 0 时，桩按下面顺序回 <code>configurationKey</code>。布尔值假写成 <code>False</code>，真写成 <code>true</code>，大小写不统一。指定了 key 时只回点名的那些，未知 key 放进 <code>unknownKey</code>。</p>
+  <table>
+    <tr><th>key</th><th>value</th><th>只读</th></tr>
+    <tr><td>AuthorizeRemoteTxRequests</td><td>固定 <code>False</code></td><td>是</td></tr>
+    <tr><td>ConnectionTimeOut</td><td><code>ocpp_ConnectionTimeOut</code> 秒</td><td>否</td></tr>
+    <tr><td>GetConfigurationMaxKeys</td><td>固定 <code>26</code></td><td>是</td></tr>
+    <tr><td>HeartbeatInterval</td><td>参数里的心跳秒数</td><td>否</td></tr>
+    <tr><td>LocalAuthorizeOffline</td><td>参数 0/1</td><td>否</td></tr>
+    <tr><td>MeterValuesSampledData</td><td>已打开的 measurand，逗号拼接</td><td>否</td></tr>
+    <tr><td>MeterValueSampleInterval</td><td>电量采样秒数</td><td>否</td></tr>
+    <tr><td>GridCurrentInterval</td><td><code>ocpp_GridCurrentInterval</code></td><td>否</td></tr>
+    <tr><td>StopTransactionOnEVSideDisconnect</td><td>固定 <code>true</code>，不读参数里的同名字段</td><td>是</td></tr>
+    <tr><td>StopTransactionOnInvalidId</td><td>参数 0/1</td><td>是</td></tr>
+    <tr><td>SupportedFeatureProfiles</td><td><code>Core,FirmwareManagement,LocalAuthListManagement,Reservation,SmartCharging,RemoteTrigger</code></td><td>是</td></tr>
+    <tr><td>UnlockConnectorOnEVSideDisconnect</td><td>参数 0/1</td><td>否</td></tr>
+    <tr><td>LocalAuthListEnabled</td><td>参数 0/1</td><td>否</td></tr>
+    <tr><td>LocalAuthListMaxLength</td><td>固定 <code>100</code></td><td>是</td></tr>
+    <tr><td>SendLocalListMaxLength</td><td>固定 <code>10</code></td><td>是</td></tr>
+    <tr><td>ChargeProfileMaxStackLevel</td><td>固定 <code>5</code></td><td>是</td></tr>
+    <tr><td>ChargingScheduleMaxPeriods</td><td>固定 <code>8</code></td><td>是</td></tr>
+    <tr><td>MaxChargingProfilesInstalled</td><td>固定 <code>5</code></td><td>是</td></tr>
+    <tr><td>MaxCurrent</td><td><code>rated_current</code></td><td>否</td></tr>
+    <tr><td>ChargerMode</td><td><code>chargemode</code>，1/2/3</td><td>否</td></tr>
+    <tr><td>GetCTClampValue</td><td>参数 <code>ocpp_GetCTClampValue</code></td><td>否</td></tr>
+    <tr><td>UpperLimitProtectionVoltage</td><td>过压门限</td><td>否</td></tr>
+    <tr><td>CommunicationNetwork</td><td><code>net_interfaces_enable</code> 的数值</td><td>否</td></tr>
+    <tr><td>OCPPAdminMode</td><td><code>0</code> 或 <code>1</code></td><td>否</td></tr>
+    <tr><td>OEM_RSSI</td><td><code>Modem: n. WiFi: n dBm.</code>。对应接口没使能时该项 RSSI 先改成 0</td><td>是</td></tr>
+  </table>
+  <p>头文件里还有 NumberOfConnectors、LocalPreAuthorize、SupportedFileTransferProtocols，获取全部 key 的这段代码把它们注释掉了，空请求不会回这三项。</p>
+
+  <h3>GetDiagnostics 和平台发起的 DataTransfer</h3>
+  <p>GetDiagnostics 的 CallResult 带 <code>fileName</code>，格式 <code>log-充电桩ID-开始时间-结束时间.txt</code>。开始、结束来自平台的起止时间，再夹到本地日志实际有记录的范围。</p>
+  <p>平台 DataTransfer 只认三个 messageId。GetCTClampValue 回 Accepted，data 是字符串 <code>{"current":电网A相电流原始值×10,"voltage":L1电压原始值×100}</code>，这里不分三相。4GAT 把 data 当 AT 命令发给 4G 模组，等 <code>OK</code>，1 秒超时；成功则 data 换成模组回包并 Accepted，失败则 data 清空并 Rejected。WIFIAT 同样处理，命令发给 BW20。其它 messageId，或没有 messageId，回 UnknownMessageId。</p>
+
   <p>清单里的 GetLog、LogStatusNotification 标成支持，是因为有本地日志。源码没有这两个报文名。日志是 <code>log_record</code>，按平台要求上传走的是 GetDiagnostics。</p>
 </section>
 <section id="offline">
