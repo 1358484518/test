@@ -16,10 +16,13 @@
   <a href="output.html">输出</a>
   <a href="protect.html">保护</a>
   <a href="auth.html">授权</a>
+  <a href="rs485.html">485</a>
   <a href="ocpp.html">OCPP</a>
   <a href="network.html">网络</a>
   <a href="energy.html">负载</a>
-  <a href="system.html">系统</a>
+  <a href="param.html">参数</a>
+  <a href="upgrade.html">升级</a>
+  <a href="system.html">差异</a>
 </nav>
 <main>
 <section id="task">
@@ -35,6 +38,20 @@
     <li><code>set_led_proc</code>：按故障码和状态刷灯。</li>
   </ol>
   <p>所以“进了充电态”和“接触器已经吸合”不是同一拍里必然同时发生。充电态函数把 <code>contactor_enable</code> 置 1 之后，要等电流合成结果不小于 6A，接触器才会合。</p>
+<pre><code>switch (CHARGE_STATE)
+{
+case CHARGER_Wait:       charge_waiting();    break;
+case CHARGER_Prepare:    charge_preparing();  break;
+case CHARGER_Charging:   charge_charging();   break;
+case CHARGER_Supend:     charge_suspending(); break;
+case CHARGER_Finishing:  charge_finishing();  break;
+case CHARGER_Fault:      charge_fauting();    break;
+case CHARGER_Reserved:   charge_resvering();  break;
+case CHARGER_Unavailable:charge_unavailabing(); break;
+}
+set_current_proc();
+set_contactor_proc();
+set_led_proc();</code></pre>
 </section>
 <section id="plug">
   <h2>1.2 怎样算插上枪</h2>

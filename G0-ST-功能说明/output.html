@@ -16,10 +16,13 @@
   <a href="output.html">输出</a>
   <a href="protect.html">保护</a>
   <a href="auth.html">授权</a>
+  <a href="rs485.html">485</a>
   <a href="ocpp.html">OCPP</a>
   <a href="network.html">网络</a>
   <a href="energy.html">负载</a>
-  <a href="system.html">系统</a>
+  <a href="param.html">参数</a>
+  <a href="upgrade.html">升级</a>
+  <a href="system.html">差异</a>
 </nav>
 <main>
 <section id="current">
@@ -46,6 +49,14 @@
     <li>百分数乘 10，写入 TIM3 通道 3 的比较寄存器。周期寄存器是 999，比较值 0～1000 对应 0%～100%，步进 0.1%。</li>
   </ul>
   <p>例子：6A → 10% → 比较值 100；32A → 约 53.3% → 533；63A → 89.2% → 892。这是 IEC 61851-1 的电流通告，程序上限停在 63A，没有做到标准里的 80A。</p>
+<pre><code>if (current &lt;= 51)
+    pwmduty = (float)current / 0.6f;
+else
+    pwmduty = (float)current / 2.5f + 64.0f;
+CP_PWM_SetDuty(pwmduty * 10);   /* TIM3 周期 999，1000 = 100% */
+
+/* pwm_current == 0 时不走上面，直接： */
+CP_PWM_SetDuty(1000);           /* 稳态高电平，不通告电流 */</code></pre>
   <p>电流为 0 时调用 <code>CP_PWM_SetDuty(1000)</code>。比较值被限制不超过 1000；等于 1000 时软件记录的 CP 电流清 0。CP 保持高电平，不再发 1 kHz 方波，车辆看到的可用电流是 0。等待、暂停以外的停机、以及电流被限制到 6A 以下，都走这条。</p>
   <p>各状态对 PWM 允许位：等待关掉；准备、充电、暂停打开；结束和停机出口关掉。准备进充电额外要求合成电流已经 ≥ 6A，所以占空比还是 100% 稳态时不会吸接触器。</p>
 </section>

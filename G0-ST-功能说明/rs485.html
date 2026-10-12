@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>5. RS485</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <h1>5. RS485</h1>
+  <p>同一根 485 上有三件事：读电表、接 DLB 主机、产测命令。拨码 <code>bcd3</code> 决定前两件谁接收。调试命令只吃没被 Modbus 解析掉的字节。</p>
+</header>
+<nav class="top">
+  <a href="index.html">目录</a>
+  <a href="charge.html">充电</a>
+  <a href="output.html">输出</a>
+  <a href="protect.html">保护</a>
+  <a href="auth.html">授权</a>
+  <a href="rs485.html">485</a>
+  <a href="ocpp.html">OCPP</a>
+  <a href="network.html">网络</a>
+  <a href="energy.html">负载</a>
+  <a href="param.html">参数</a>
+  <a href="upgrade.html">升级</a>
+  <a href="system.html">差异</a>
+</nav>
+<main>
+<section>
+  <h2>5.1 一根线怎么分</h2>
+  <table>
+    <tr><th>项</th><th>源码事实</th></tr>
+    <tr><td>引脚</td><td>PC6 发，PC7 收。方向控制宏 <code>RS485_SET_COMM_SEND/RECV</code> 被注释成空，程序不翻转收发使能</td></tr>
+    <tr><td>接收</td><td><code>main</code> 把 USART2 标成 485。接收回调里 USART2 按拨码分流</td></tr>
+    <tr><td>发送</td><td><code>rs485_send</code> 调用的是 <code>huart6</code>。USART6 接收回调还在，注释写已经不用。收、发不是同一个串口</td></tr>
+    <tr><td>拨码</td><td><code>bcd3_state == 1</code> 进电表主机；为 0 进 DLB 从机</td></tr>
+    <tr><td>剩余字节</td><td>中断返回 0 的字节进入 <code>uart_rs485_rx</code>，100 ms 的 <code>tmxsh_process</code> 当调试命令</td></tr>
+    <tr><td>不要和网口混淆</td><td>BW20 的 <code>AT+SOCKET=3,502</code> 是 Modbus TCP，不走这根 485</td></tr>
+  </table>
+<pre><code>else if (huart->Instance == USART2)
+{
+    if (gpio_handle.bcd3_state)
+        ret = meter_rx_irq(uart_rs485_rx.data);   /* 桩当主机，读电表 */
+    else
+        ret = dlb_rx_irq(uart_rs485_rx.data);     /* 桩当从机，接 DLB */
+    if (ret == 0)
+        /* 不是 Modbus 帧，留给 tmxsh_process */
+}</code></pre>
+</section>
+<section>
+  <h2>5.2 电表主机</h2>
+  <p><code>energy_meter_process</code> 每 100 ms。 <code>bcd3_state == 0</code> 时直接返回，不发电表命令。</p>
+  <table>
+    <tr><th>步骤</th><th>条件</th><th>结果</th></tr>
+    <tr><td>改参数</td><td>波特率或地址变化</td><td><code>meter_uart_baudrate_set</code> 改 <code>huart6</code>。地址默认 1，合法 1～254。波特率默认 9600，超出 1200～115200 则改回 9600</td></tr>
+    <tr><td>识别</td><td>尚未识别到表</td><td>每 500 ms 交替发东鸿（功能码 0x03）和 BG（0x04）的型号命令</td></tr>
+    <tr><td>东鸿型号字节</td><td>0x0089 / 0x0020 或 0x0004 / 0x00E1</td><td>SDM72 / SDM120M / SDM54</td></tr>
+    <tr><td>BG 型号字节</td><td>0x0065</td><td>BG 表</td></tr>
+    <tr><td>30 秒仍无表</td><td>超时计数写成 31</td><td>大于 20 即电表故障，告警，充电中进暂停</td></tr>
+    <tr><td>已识别</td><td>约每 500 ms</td><td>电压电流功率 与 电量 两条命令交替。应答地址必须等于 <code>meter_address</code>，功能码 0x03 或 0x04</td></tr>
+  </table>
+</section>
+<section>
+  <h2>5.3 DLB 从机</h2>
+  <p><code>RS485_slave_process</code> 每 5 ms。代码里的从机地址 <code>rs485_slave_addr</code> 固定 <code>0x01</code>。调试命令改的 <code>dlb_id</code> 没有赋给这个变量。</p>
+  <table>
+    <tr><th>条件</th><th>动作</th></tr>
+    <tr><td><code>dlb_mode == 0</code> 或拨码在电表侧</td><td>清通信故障，允许电流等于额定电流，函数返回</td></tr>
+    <tr><td>模式 1 且 60 秒没有合法帧</td><td>通信故障置位，电流收到 6A。故障码 13，紫灯，不停充</td></tr>
+    <tr><td>地址不是 0x00、0xFF、0x01</td><td>丢弃</td></tr>
+    <tr><td>功能码 0x10，寄存器 0，3 个寄存器 6 字节，CRC 正确</td><td>三相取三相电流最小值。单相按相序 0～3 / 4～5 / 6～7 取第 1 / 2 / 3 相。只把 <code>dlb_current</code> 改小</td></tr>
+    <tr><td>功能码 0x06，寄存器 1，CRC 正确</td><td>电流等于数据字节，同样只改小</td></tr>
+    <tr><td>每 5 秒，且模式 1、正在充电</td><td>小于目标则加 1A，大于目标则立刻收到目标。等待和准备里模式 1 会把电流复位成 6A</td></tr>
+  </table>
+  <p>这个电流是 CP 占空比的最后一道上限，小于 6A 时不再发方波。</p>
+</section>
+<section>
+  <h2>5.4 调试命令</h2>
+  <p>只有没被电表或 DLB 状态机吃掉的字节，才会在 100 ms 任务里被当成字符串。</p>
+  <table>
+    <tr><th>命令</th><th>做什么</th></tr>
+    <tr><td><code>Master-&gt;Check_*</code></td><td>产测：电压、对地、电流、蜂鸣、Flash、RFID、WiFi、网口、4G、按键、灯、NTC、漏电、CP、PP、锁、继电器、CT、光伏电流</td></tr>
+    <tr><td><code>Master-&gt;Write_SN</code> / <code>Check_SN</code> / <code>SN=</code></td><td>写、读序列号</td></tr>
+    <tr><td><code>ENTER_CAL</code> / <code>EXIT_CAL</code> / <code>SET_RELAY</code></td><td>校准模式，可强制继电器。校准中按发布说明屏蔽过流和漏电</td></tr>
+    <tr><td><code>GET/SET/SAVE_CAL_COEFF</code> / <code>GET_MEASURE</code></td><td>校准系数和测量值</td></tr>
+    <tr><td><code>ParameterSet:</code> / <code>ParameterGet:</code></td><td>改、读参数并 <code>sys_param_set</code>。<code>RS485SlaveAddress</code> 改的是 <code>dlb_id</code>，不是从机地址 0x01</td></tr>
+    <tr><td><code>TEST_MODE_ENABLE</code></td><td>测试模式。主循环不再跑充电和 OCPP</td></tr>
+    <tr><td><code>4GAT:</code> / <code>WIFIAT:</code></td><td>把后面的字符串原样发给 4G 或 WiFi</td></tr>
+    <tr><td><code>FACTORY_RESET</code> / <code>OEM_RSSI</code> / <code>ENERGY</code> / <code>POWER</code></td><td>恢复出厂、读信号、电量、功率</td></tr>
+  </table>
+  <p><a href="index.html">返回目录</a></p>
+</section>
+</main>
+</body>
+</html>
