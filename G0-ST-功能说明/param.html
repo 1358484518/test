@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>参数存储</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <h1>参数存储</h1>
+  <p>运行参数是结构体 <code>sys_param</code>。掉电要保住的那一份写在 MCU 内部 Flash，不写外部 W25Q。外部 Flash 用来存固件包和离线交易记录，和参数不是同一块介质。</p>
+</header>
+<nav class="top">
+  <a href="index.html">目录</a>
+  <a href="charge.html">充电</a>
+  <a href="output.html">输出</a>
+  <a href="protect.html">保护</a>
+  <a href="auth.html">授权</a>
+  <a href="ocpp.html">OCPP</a>
+  <a href="network.html">网络</a>
+  <a href="energy.html">负载</a>
+  <a href="param.html">参数</a>
+  <a href="upgrade.html">升级</a>
+  <a href="system.html">系统</a>
+</nav>
+<main>
+<section>
+  <h2>上电怎么读出来</h2>
+  <p><code>main</code> 里先调用 <code>ParamBlock_init</code>，再 <code>sys_param_get</code>。初始化做的事是在三份备份里找出“魔数对、CRC 对、序列号最大”的那一块，把它记成当前块。之后 <code>param_read</code> 只从这一块把数据拷进 <code>sys_param</code>。</p>
+  <p>查找顺序：</p>
+  <ol>
+    <li>主区，Flash Bank2 的 sector 120。里面有 3 块，每块 2048 字节。魔数必须是 <code>0xAA552772</code>。读的时候魔数会连读三次，三次都不对才当无效。数据区做 CRC16，只有和块尾保存的 CRC 低 16 位一致，并且序列号更大，才采纳。</li>
+    <li>主区没有任何一块同时满足魔数和 CRC 时，用同样规则扫备份区 sector 121。找到后把这一块抄回主区。</li>
+    <li>主区和备份区的魔数都整区无效时，再扫第三份，sector 119（地址按 Bank1 的扇区公式计算）。找到就同时写回主区和备份区。</li>
+    <li>第三份只有 CRC 错、魔数还在时，仍用序列号最大的那块，重新算 CRC 后写回前两份。</li>
+    <li>三份都不可用：擦掉主区和备份区，写入一块空数据（数据区填 <code>0xFF</code>），序列号从 0 开始。随后参数检查会发现序列号、服务器地址等是空的，再填默认值。</li>
+  </ol>
+  <p>读路径本身不再验 CRC。<code>param_read</code> 相信初始化已经选好了块，按长度把数据区拷出来。长度超过 2032 字节会直接失败。2032 来自 2048 减去 8 字节头（魔数和序列号）再减去 8 字节尾（CRC 和保留字）。</p>
+</section>
+<section>
+  <h2>什么时候写、写进去之前查什么</h2>
+  <p>业务改完 <code>sys_param</code> 后调用 <code>sys_param_set</code>。它先跑 <code>sys_parm_check_all</code>。桩号、序列号、服务器 URL、授权密钥、管理平台 URL、心跳、采样周期、电流、温度、网络接口等每一项都有范围。任何一项不合法，函数不写 Flash，而是再从当前块把旧参数读回来，内存里刚才的修改作废。</p>
+  <p>校验通过才进 <code>param_write</code>。写之前还有两道闸：</p>
+  <ul>
+    <li>和当前块里的内容逐字节比较。完全一样就返回，不擦不写，日志是参数没有修改。</li>
+    <li><code>lowvoltage_count</code> 大于 25×20 时拒绝写入，避免掉电过程中把半截数据烧进 Flash。</li>
+  </ul>
+  <p>真正要写时，块号加 1，三块用完回到 0；序列号加 1。新块带上魔数、新序列号、参数数据（后面补 <code>0xFF</code>）、以及整段数据区的 CRC16。然后按这个顺序各写一份：第三份（sector 119）、备份区（sector 121）、主区（sector 120）。所以一次成功的保存，三份里都会出现这个新序列号。</p>
+  <p>调用 <code>sys_param_set</code> 的地方包括：OCPP 的 ChangeConfiguration 和复位相关配置、蓝牙改参数（<code>APP_Save_Config</code> 就是它）、网页保存配置、调试串口改参数、保存时钟和时区。恢复出厂 <code>sys_param_reset</code> 会先记住序列号和桩号，其余填默认值，再写回去，序列号和桩号不会被清掉。</p>
+  <div class="note">升级流程在下载成功后把 <code>fw_update_state</code> 改成 1 或 11，并置 <code>save_config</code>。源码里只有置位，没有看到谁读取这个标志再调用 <code>sys_param_set</code>。因此升级状态是否落盘，取决于后面还有没有别的保存把整个结构体写进去。</div>
+</section>
+<section>
+  <h2>一块参数里有什么</h2>
+  <p>默认值在 <code>sys_param_set_to_default</code>。和运行直接相关的包括：</p>
+  <ul>
+    <li>身份：序列号、桩号、MCU 唯一号。服务器地址、局域网 IP、网关、掩码、DNS、MAC。DHCP 默认关。</li>
+    <li>网络：WiFi 名和密码、4G 的 APN（账号密码默认 user/pass）、使能的接口。充电模式默认 3。额定电流、保护温度。</li>
+    <li>OCPP：心跳 300 秒，电量采样 60 秒，连接超时 90 秒。离线本地授权和本地名单默认开，授权缓存默认关，预授权默认开，未知身份离线交易默认关。无效身份最多 2000（和停止条件里的电量比较）。交易报文最多试 3 次，间隔 10 秒。管理平台默认关。</li>
+    <li>保护门限、灯亮度、电表波特率 9600、地址 1。离线自动充电默认 10 分钟。防拆和 OPDD 默认开。保护屏蔽字默认 <code>0x27000001</code>。电压电流校准系数默认 1，功率系数默认 0.985。</li>
+    <li>拨码：默认值会按 BCD1、BCD2、BCD3 的电平写进 <code>dip_level</code>。</li>
+  </ul>
+  <p>读出之后 <code>check_config_info</code> 再扫一遍。序列号首字节是 0 或 <code>0xFF</code>、URL 不像 ws/wss、心跳或电流超出范围、电表地址不在 1～254，都会改成默认值。这一步改的是内存；要落盘仍得再走 <code>sys_param_set</code>。</p>
+  <p>授权密钥这类字段放在 <code>sec_section</code> 里，用 AES-CBC 加密后再随 <code>sys_param</code> 一起写入。密钥由 MCU 唯一号推导。读的时候 <code>sec_param_get</code> 解密到另一块内存，校验授权密钥时用的是解密后的内容。</p>
+</section>
+<section>
+  <h2>不在这三份里的数据</h2>
+  <p>OCPP 充电计划单独占 sector 124。<code>ChargingProfile_write</code> 先整扇区擦除再写入，没有三块轮换，也没有上面那套 CRC 选择。离线交易记录走 <code>ChargeRecord_Handle.c</code> 的另一段 Flash 地址，按记录追加，不是 <code>sys_param</code>。固件包在外部 W25Q，见<a href="upgrade.html">升级</a>。</p>
+  <p><a href="upgrade.html">下一章：升级</a></p>
+</section>
+</main>
+</body>
+</html>

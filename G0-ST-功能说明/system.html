@@ -7,8 +7,8 @@
 </head>
 <body>
 <header>
-  <h1>8. 参数、升级，以及和清单的差异</h1>
-  <p>这一章只写还没在前面展开的功能，以及清单表格和源码对不上的地方。</p>
+  <h1>和清单的差异</h1>
+  <p>参数怎么存见<a href="param.html">参数存储</a>，固件怎么下见<a href="upgrade.html">升级</a>。这一页只保留清单和源码对不上的地方。</p>
 </header>
 <nav class="top">
   <a href="index.html">目录</a>
@@ -19,26 +19,11 @@
   <a href="ocpp.html">OCPP</a>
   <a href="network.html">网络</a>
   <a href="energy.html">负载</a>
+  <a href="param.html">参数</a>
+  <a href="upgrade.html">升级</a>
   <a href="system.html">系统</a>
 </nav>
 <main>
-<section id="param">
-  <h2>8.1 参数</h2>
-  <p>运行参数在 <code>sys_param</code>，包括服务器 URL、充电模式、心跳和采样周期、额定电流、网络接口使能、光伏、家庭负载、保护屏蔽、离线充电时间。上电若充电模式不是 1～3，拉回默认值 3。写入前走 <code>ParamCheck</code>，范围不对就拒绝。</p>
-  <p>能改它的通道：</p>
-  <ul>
-    <li>OCPP ChangeConfiguration，以及一部分 DataTransfer。</li>
-    <li>蓝牙配置命令，见<a href="network.html#bt">网络一章</a>。改完置参数变化标志，随后存 Flash。</li>
-    <li>以太网网页 <code>Httpd_WebPage_Handle.c</code>。有线接口在扩展板上，网页服务挂在 <code>LAN_Manager</code> 里。</li>
-  </ul>
-  <p>清单写的触摸屏改参数，程序没有。LCD 每秒 <code>update_GUI</code> 刷新状态，不能触摸。没有物理按键。拨码用于硬件配置，其中 bcd3 还决定电表轮询函数是否直接返回。涂鸦 APP 改参数，源码没有对应云接口。</p>
-</section>
-<section id="fw">
-  <h2>8.2 升级和诊断</h2>
-  <p>平台 UpdateFirmware 启动下载。状态变化时桩发 FirmwareStatusNotification。下载期间充电相关状态（充电、准备、暂停、结束）或 OCPP 仍在发送时，升级任务不往下做；已经在下载时，普通 OCPP 主动报文停掉。签名升级 SignedUpdateFirmware 和 SignedFirmwareStatusNotification 的处理函数在源码里有，清单写的是暂时不支持。</p>
-  <p>WiFi 模组自己的升级走 AT OTA。状态大于 1 且当前上网是 WiFi 时，网络切换任务直接退出。蓝牙协议里有升级请求、分包下载、校验。清单写这条不支持、实际用 cptool。</p>
-  <p>诊断日志只在 GetDiagnostics 之后上传，细节在 <a href="ocpp.html#call">OCPP</a>。没有 SD 卡升级，没有涂鸦 OTA。生产测试由调试串口进入 <code>sys_test_mode</code>，那个模式下主循环不跑充电和 OCPP。</p>
-</section>
 <section id="diff">
   <h2>8.3 清单和源码不一致的地方</h2>
   <table>
