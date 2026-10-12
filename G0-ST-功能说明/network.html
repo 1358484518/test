@@ -58,9 +58,51 @@
   <p>4G 状态机在 1 ms 的 <code>SIM_Task</code>。以太网在 5 ms 的 <code>LAN_Manager</code>，里面带网页服务。OCPP 字节只从 <code>net_interface</code> 指向的那一条出去。</p>
 </section>
 <section id="bt">
-  <h2>6.4 蓝牙配置协议</h2>
-  <p>手机数据进 <code>BT_Task</code>。会话类有连接、退出、密码、改密码、读设备信息。配置类写完参数后，应答仍要经 <code>AT+BLESENDRAW</code> 发出，因此会和 OCPP 的 SOCKETSEND 互相等待。</p>
-  <p>能改的内容：WiFi 名和密码、服务器地址和账号、额定电流、4G、充电模式、动态负载、家庭均衡、光伏、免费身份、充电时段、上网方式、局域网参数、序列号、相序、保护屏蔽、RFID 名单增删查，以及充电启停、电子锁、蜂鸣器、恢复出厂、读 AP 列表。协议里还有固件升级请求、下载、校验三条命令。清单写蓝牙升级不支持、走 cptool，这三条命令在源码里是有的。</p>
+  <h2>7.4 链路连接和加密认证</h2>
+  <p>要分开两层。手机和模组的 BLE 连接由 BW20 自己完成，桩只看到 <code>+BLESTATE</code> 把 <code>bt_connected</code> 置 1，以及 <code>+DATA</code> 里的字节。加密不在 BLE 配对里做，而在这些字节上的应用协议，入口是 <code>BT_Task</code>。</p>
+  <table>
+    <tr><th>步骤</th><th>谁先</th><th>做什么</th></tr>
+    <tr><td>1. 空中连接</td><td>手机连模组</td><td>广播已在初始化里打开。连上之前桩不跑应用协议</td></tr>
+    <tr><td>2. 连接命令 0x21</td><td>手机，明文</td><td>帧头必须是 <code>0xA5 0xA5</code>，类型 <code>0x01</code>。未连接时别的命令直接回错误 <code>0xE2</code></td></tr>
+    <tr><td>3. 协商密钥</td><td>桩计算后明文回复</td><td>见下面的密钥表。回复帧头是 <code>0x5A 0x5A</code>，协议版本字符是 <code>'0'+7</code></td></tr>
+    <tr><td>4. 密码 0x23</td><td>手机，已按协商模式加密</td><td>8 字节密码对上才把 <code>password_accept</code> 置 1</td></tr>
+    <tr><td>5. 业务命令</td><td>手机</td><td>没通过密码时，只放行连接、退出、密码、读设备信息、读序列号、读充电状态</td></tr>
+    <tr><td>6. 退出 0x22</td><td>手机</td><td>清掉连接和密码标志，加密模式改回不加密。若改过参数，先 <code>sys_param_set</code> 再重启</td></tr>
+  </table>
+  <h3>帧</h3>
+  <p>头 5 字节：起始 2、类型 1、命令 1、载荷长度 1。后面是载荷、1 字节累加和、结束字节 <code>0x88</code>。累加和在解密之前核对，所以加密帧核对的是密文。对不上分别回 <code>0xE7</code> 帧头、<code>0xE1</code> 类型、<code>0xE3</code> 长度、<code>0xE6</code> 无 0x88、<code>0xE5</code> 校验和。</p>
+  <h3>三种加密</h3>
+  <table>
+    <tr><th>手机在连接帧里给的模式字符</th><th>模式</th><th>之后每个载荷</th></tr>
+    <tr><td><code>'0'</code></td><td>不加密</td><td>原样</td></tr>
+    <tr><td><code>'1'</code></td><td>掩码</td><td>每个字节与 16 字节会话密钥按位置异或，密钥循环使用</td></tr>
+    <tr><td><code>'2'</code>，或不是 0/1/2</td><td>AES。非法值也落成 AES，因为 <code>BTUSE_ENCRYPT_MODE</code> 定义为 AES</td><td>AES-CBC，密钥 16 字节，IV 为 16 个 0。长度按 PKCS5 补到 16 的倍数，填充字节的值等于填充长度</td></tr>
+  </table>
+  <p>连接命令本身强制按“不加密”解码，不使用会话密钥。</p>
+  <h3>密钥怎么出来</h3>
+  <p><code>gen_key(序列号)</code> 得到 2 字节客户码 <code>cuscode</code> 和 32 字节 <code>cuskey</code>。手机连接帧里带 2 字节 <code>custom_code</code> 和 8 字节随机数 A。桩自己再生成 8 字节随机数 B。</p>
+  <table>
+    <tr><th>密钥</th><th>算法</th><th>用在哪</th></tr>
+    <tr><td>回复里的 key 字段</td><td>SHA1(<code>cuscode ‖ cuskey ‖ 随机数B</code>) 的前 8 字节，再转成 16 个十六进制字符</td><td>明文放进连接应答。应答发出去时还没换成下面的会话密钥</td></tr>
+    <tr><td>会话密钥</td><td>SHA1(<code>cuscode ‖ cuskey ‖ 随机数A ‖ 随机数B</code>) 的前 16 字节</td><td>应答组包之后立刻覆盖 <code>app_sha1_key</code> 和 <code>charger_sha1_key</code>。后面所有加解密都用这 16 字节</td></tr>
+  </table>
+  <p>手机要自己用同一个序列号派生出 <code>cuscode</code>、<code>cuskey</code>，并用自己的随机数 A 和应答里的随机数 B 算出同一把会话密钥。桩不会把这 16 字节会话密钥原样发给手机。</p>
+<pre><code>/* 连接应答已经放入发送缓冲之后 */
+SHA1(cuscode || cuskey || randA || randB) 的前 16 字节
+    -&gt; app_sha1_key
+    -&gt; charger_sha1_key
+
+/* 之后除连接命令外 */
+bt_decode_bykey(协商的模式, 载荷, app_sha1_key);</code></pre>
+  <h3>密码</h3>
+  <table>
+    <tr><th>比对</th><th>通过时</th></tr>
+    <tr><td>8 字节等于 <code>sec_param.bt_password</code></td><td><code>password_accept = 1</code>，应答 <code>'1'</code></td></tr>
+    <tr><td>否则用 <code>gen_pwd(序列号, 手机带的 8 字节随机数)</code> 得到超级口令，再比前 8 字节</td><td>相同也通过</td></tr>
+    <tr><td>两个都不对</td><td><code>password_accept = 0</code>，应答 <code>'0'</code>。配置命令仍被 <code>0xE2</code> 拒绝</td></tr>
+  </table>
+  <p>改密码命令把新的 8 字节写入 <code>bt_password</code>，并立刻 <code>sec_param_store</code>。这是加密段，不走普通 <code>sys_param</code> 那三份参数块。退出时如果普通参数改过，才 <code>sys_param_set</code> 并重启。</p>
+  <p>能改的内容：WiFi 名和密码、服务器地址和账号、额定电流、4G、充电模式、动态负载、家庭均衡、光伏、免费身份、充电时段、上网方式、局域网参数、序列号、相序、保护屏蔽、RFID 名单，以及充电启停、电子锁、蜂鸣器、恢复出厂、读 AP 列表。固件升级三条命令在命令表里被注释，正常会话进不去。应答经 <code>AT+BLESENDRAW</code> 发出，会和 OCPP 的 SOCKETSEND 抢同一条 AT 通道。</p>
   <p><a href="energy.html">下一章：这些电流上限从哪来</a></p>
 </section>
 </main>
