@@ -1,4 +1,6 @@
 :root { --ink:#1c2430; --muted:#5c6b7a; --line:#d7dee7; --bg:#f4f7fb; --card:#fff; }
+html { scroll-padding-top: 76px; }
+[id] { scroll-margin-top: 76px; }
 * { box-sizing: border-box; }
 body { margin:0; font:16px/1.7 "Segoe UI","Microsoft YaHei",sans-serif; color:var(--ink); background:var(--bg); }
 header { background:#16324f; color:#fff; padding:22px 6vw 16px; }

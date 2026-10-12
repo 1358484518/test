@@ -39,7 +39,7 @@
     <tr><td>2044</td><td>reserved</td><td>4</td><td>写入时填 <code>0xFFFFFFFF</code></td></tr>
   </table>
 </section>
-<section>
+<section id="backup">
   <h2>2. 上电选哪一块</h2>
   <p><code>main</code> 调用 <code>ParamBlock_init</code>，然后 <code>SysConfig_Init</code> 里 <code>sys_param_get</code> 从选中的块把数据拷进 RAM。<code>param_read</code> 不再验 CRC。</p>
   <table>
@@ -155,7 +155,7 @@
     <tr><td>ocpp_admin_AuthorizationKey</td><td>48</td></tr>
   </table>
 </section>
-<section>
+<section id="behavior">
   <h2>4A. 每个参数实际控制什么</h2>
   <p>上一节是能不能写入。这一节是写进去之后程序用它做什么。没有读到使用点的字段单独列在最后，移植时不要假设它们已经生效。</p>
   <table>
@@ -223,7 +223,7 @@
     <tr><td>ct_clamps 广播端口和间隔</td><td>默认端口 10000，间隔 5。广播函数在主循环被注释，间隔只在函数启用且采样方式不是 4 时用来发送</td></tr>
   </table>
 </section>
-<section>
+<section id="addr">
   <h2>5. 内部 Flash 和外部 Flash 分开记</h2>
   <p>两套介质不要混。内部 Flash 由 <code>param_write</code>、<code>ChargingProfile_write</code> 写。外部是 W25Q，函数是 <code>DEV_W25X_Read/Write</code>。安全密钥不单独占内部地址，加密后塞进 <code>sys_param.sec_section</code>，跟参数走同一套三块轮写。</p>
   <h3>内部 Flash：现在真正在写的</h3>
