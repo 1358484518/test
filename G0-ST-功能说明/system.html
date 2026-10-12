@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>8. 系统与差异</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <h1>8. 参数、升级，以及和清单的差异</h1>
+  <p>这一章只写还没在前面展开的功能，以及清单表格和源码对不上的地方。</p>
+</header>
+<nav class="top">
+  <a href="index.html">目录</a>
+  <a href="charge.html">充电</a>
+  <a href="output.html">输出</a>
+  <a href="protect.html">保护</a>
+  <a href="auth.html">授权</a>
+  <a href="ocpp.html">OCPP</a>
+  <a href="network.html">网络</a>
+  <a href="energy.html">负载</a>
+  <a href="system.html">系统</a>
+</nav>
+<main>
+<section id="param">
+  <h2>8.1 参数</h2>
+  <p>运行参数在 <code>sys_param</code>，包括服务器 URL、充电模式、心跳和采样周期、额定电流、网络接口使能、光伏、家庭负载、保护屏蔽、离线充电时间。上电若充电模式不是 1～3，拉回默认值 3。写入前走 <code>ParamCheck</code>，范围不对就拒绝。</p>
+  <p>能改它的通道：</p>
+  <ul>
+    <li>OCPP ChangeConfiguration，以及一部分 DataTransfer。</li>
+    <li>蓝牙配置命令，见<a href="network.html#bt">网络一章</a>。改完置参数变化标志，随后存 Flash。</li>
+    <li>以太网网页 <code>Httpd_WebPage_Handle.c</code>。有线接口在扩展板上，网页服务挂在 <code>LAN_Manager</code> 里。</li>
+  </ul>
+  <p>清单写的触摸屏改参数，程序没有。LCD 每秒 <code>update_GUI</code> 刷新状态，不能触摸。没有物理按键。拨码用于硬件配置，其中 bcd3 还决定电表轮询函数是否直接返回。涂鸦 APP 改参数，源码没有对应云接口。</p>
+</section>
+<section id="fw">
+  <h2>8.2 升级和诊断</h2>
+  <p>平台 UpdateFirmware 启动下载。状态变化时桩发 FirmwareStatusNotification。下载期间充电相关状态（充电、准备、暂停、结束）或 OCPP 仍在发送时，升级任务不往下做；已经在下载时，普通 OCPP 主动报文停掉。签名升级 SignedUpdateFirmware 和 SignedFirmwareStatusNotification 的处理函数在源码里有，清单写的是暂时不支持。</p>
+  <p>WiFi 模组自己的升级走 AT OTA。状态大于 1 且当前上网是 WiFi 时，网络切换任务直接退出。蓝牙协议里有升级请求、分包下载、校验。清单写这条不支持、实际用 cptool。</p>
+  <p>诊断日志只在 GetDiagnostics 之后上传，细节在 <a href="ocpp.html#call">OCPP</a>。没有 SD 卡升级，没有涂鸦 OTA。生产测试由调试串口进入 <code>sys_test_mode</code>，那个模式下主循环不跑充电和 OCPP。</p>
+</section>
+<section id="diff">
+  <h2>8.3 清单和源码不一致的地方</h2>
+  <table>
+    <tr><th>清单条目</th><th>清单</th><th>源码实际</th></tr>
+    <tr><td>WiFi/BLE 模组</td><td>ESP32，不支持跟 BW20 自动切换</td><td>正常循环调用 <code>wifi_ble_task</code>，AT 命令是 BW20 的。 <code>esp32_process</code> 只在测试模式。</td></tr>
+    <tr><td>插枪即充</td><td>软件支持</td><td>模式 3 注释是即插即充，刷卡为空，没有插枪自动授权。默认模式就是 3。</td></tr>
+    <tr><td>脱机自动充电</td><td>待定</td><td>已实现。时间为 0 或已登录则不触发。</td></tr>
+    <tr><td>急停</td><td>硬件没有，不支持</td><td>软件仍读急停脚，故障码 9，按停机。</td></tr>
+    <tr><td>Tamper、DLB 通信</td><td>待定</td><td>都有检测。防拆发安全事件。DLB 通信失败只亮紫灯，不停充。</td></tr>
+    <tr><td>签名固件、安全事件</td><td>不支持</td><td>收发函数和标志位都在。</td></tr>
+    <tr><td>GetLog</td><td>支持</td><td>没有这个报文。有本地日志和 GetDiagnostics。</td></tr>
+    <tr><td>双 OCPP</td><td>不支持</td><td><code>ocpp_admin_mode &gt; 0</code> 时有第二路，报文比主路少。</td></tr>
+    <tr><td>掉线 60 分钟重启</td><td>待定</td><td>不是整机 60 分钟重启。WiFi 连接 20 分钟无 OCPP 数据则模组 <code>AT+RST</code>。</td></tr>
+    <tr><td>AT+RESTORE</td><td>待定</td><td>在旧 ESP32 初始化里。BW20 复位用 <code>AT+RST</code>。</td></tr>
+    <tr><td>HEMS</td><td>不支持</td><td>减电流代码被编译掉。UDP 函数还在，主循环调用被注释。</td></tr>
+    <tr><td>蓝牙传固件</td><td>不支持</td><td>协议里有请求、下载、校验三条命令。</td></tr>
+    <tr><td>涂鸦、P1 电表、板载计量、5G WiFi、SD 卡、德国电表限流、EVCC 页面</td><td>不支持或待定</td><td>主流程里没有对应实现。</td></tr>
+  </table>
+  <p><a href="index.html">返回目录</a></p>
+</section>
+</main>
+</body>
+</html>

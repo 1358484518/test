@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>3. 保护</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <h1>3. 保护</h1>
+  <p>故障位在 <code>Fault_Handle.c</code> 里置位，充电任务每毫秒先扫一遍，再决定状态往哪走。</p>
+</header>
+<nav class="top">
+  <a href="index.html">目录</a>
+  <a href="charge.html">充电</a>
+  <a href="output.html">输出</a>
+  <a href="protect.html">保护</a>
+  <a href="auth.html">授权</a>
+  <a href="ocpp.html">OCPP</a>
+  <a href="network.html">网络</a>
+  <a href="energy.html">负载</a>
+  <a href="system.html">系统</a>
+</nav>
+<main>
+<section id="class">
+  <h2>3.1 三类返回值</h2>
+  <p><code>SysState_Check_Fault</code> 没有故障位时返回 0。有故障时先按优先级挑一个故障码，再决定返回 1、2 还是 3。充电状态机只认 1 和 2。</p>
+  <table>
+    <tr><th>返回</th><th>包含</th><th>等待态</th><th>准备 / 充电</th><th>暂停</th></tr>
+    <tr><td>1 停机</td><td>漏电、PEN、过流、接地、继电器、断路、CP 异常、急停；电子锁故障超过 30 秒</td><td>进故障</td><td>进结束，关 PWM、断接触器</td><td>进结束</td></tr>
+    <tr><td>2 告警</td><td>过温、过压、欠压、防拆、电表、二极管；电子锁故障的前 30 秒</td><td>也进故障</td><td>进暂停，PWM 保持，接触器在暂停态断开</td><td>留下，并带对应 OCPP 错误码</td></tr>
+    <tr><td>3</td><td>只有负载均衡通信故障</td><td colspan="3">状态不变。灯为紫色，故障码 13</td></tr>
+  </table>
+  <p>故障码和红灯闪烁次数：1 漏电或 PEN，2 过流，3 接地，4 过压或欠压，5 继电器或断路，6 CP 异常，7 电子锁，8 过温，9 急停，10 防拆，11 电表，12 二极管，13 负载均衡通信，99 其它。多个故障同时存在时，按上面这个 if-else 顺序只报前面的一个码，但故障位本身可以同时为 1。</p>
+</section>
+<section id="items">
+  <h2>3.2 每一项怎么置位</h2>
+  <h3>过温</h3>
+  <p>内部温度读数 4095 视为传感器无效，不报过温也不降功率。温度达到 <code>max_temperature</code> 并持续 5 秒，置过温，属于告警。温度达到“保护温度减 5℃”并持续 5 秒，只置降功率，PWM 电流不超过额定一半，还不进暂停。要同时取消降功率和过温，温度得回到“保护温度减 12℃”以下。</p>
+  <h3>过压、欠压</h3>
+  <p>和参数里的过压、欠压门限比较，用计数确认，避免抖动。单相或供电模式为 1 时只看 L1。过压置位后若枪还插着，过压标志会保持到拔枪才清。二者都是告警，充电中进暂停，OCPP 分别报 OverVoltage、UnderVoltage。</p>
+  <h3>接地</h3>
+  <p>看 N-PE 电压。三相桩阈值和单相不同（源码里三相约 200，单相约 700，恢复约 500，单位与采样一致）。接地是停机类，结束时 OCPP 报 GroundFailure。清单里的未接地保护走的就是这一项，另外 PE 接触器有反馈。</p>
+  <h3>漏电、PEN、过流、继电器、CP、急停</h3>
+  <p>漏电来自 RCM 模块反馈，自检在 5 ms 节拍跑，进充电前必须成功一次。PEN、过流、继电器黏连或拒动、断路、CP 异常都是停机类。急停清单写硬件没有设计，软件仍把 <code>epo_state</code> 写成 <code>EPO_Stop</code>，故障码 9，按停机处理。CP 异常在 PP 识别打开且充电中突然读到未插枪时也会置位。</p>
+  <h3>二极管</h3>
+  <p>准备态若保护位 bit0 置位，才做二极管检测，通过后标志为 2，才允许进充电。二极管故障本身是告警（返回 2）。保护位没要求检测时，程序直接把标志置成通过。</p>
+  <h3>电子锁</h3>
+  <p>有反馈。失败后 30 秒内返回 2，超过 30 秒返回 1。结束态若锁故障且仍插枪，不再尝试上锁。</p>
+  <h3>电表</h3>
+  <p>外置电表超时计数或负载电表超时计数大于 20，置电表故障，属于告警。电表功能本身见<a href="auth.html#meter">授权与计量</a>。</p>
+  <h3>防拆</h3>
+  <p>参数 <code>Tamper_Enalbe</code> 打开，并且开盖信号持续约 500 次计数，才置位。上升沿发 <code>SecurityEventNotification</code>，类型 TamperDetectionActivated。这是告警，充电中进暂停，OCPP 错误码 OtherError。信号消失后清故障位。清单把这项标成待定，源码里检测和上报都有。</p>
+  <h3>负载均衡通信</h3>
+  <p>单独返回 3，不进故障态、也不进暂停。只影响灯和故障码 13。清单标待定。</p>
+</section>
+<section id="sample">
+  <h2>3.3 采样和保护的关系</h2>
+  <p>电压、电流、CP、PP、NTC、外部 CT、PE 电流都走 ADC。CP 分档见充电一章。1 秒判断一次相数：硬件配置为三相时，只有 A 相不低于约 190V 且 B、C 都低于该值，才把本次运行当成单相，否则按三相。相数会改变过压判断看几相、停止时取哪一相电流、光伏怎么把功率折成电流、接触器看几路反馈。</p>
+  <p>板载计量芯片清单写不支持，保护用的电流电压来自 ADC 和外部 Modbus 电表，不依赖那颗芯片。</p>
+  <p><a href="auth.html">下一章：谁有权把授权位置 1</a></p>
+</section>
+</main>
+</body>
+</html>

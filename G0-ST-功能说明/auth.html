@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>4. 授权与计量</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <h1>4. 授权与计量</h1>
+  <p>刷卡在 <code>Card_Task.c</code>，每 10 ms 调用 <code>rfid_task</code>。电表在 <code>energy_meter.c</code>。</p>
+</header>
+<nav class="top">
+  <a href="index.html">目录</a>
+  <a href="charge.html">充电</a>
+  <a href="output.html">输出</a>
+  <a href="protect.html">保护</a>
+  <a href="auth.html">授权</a>
+  <a href="ocpp.html">OCPP</a>
+  <a href="network.html">网络</a>
+  <a href="energy.html">负载</a>
+  <a href="system.html">系统</a>
+</nav>
+<main>
+<section id="mode">
+  <h2>4.1 三种充电模式</h2>
+  <p><code>chargemode</code> 只允许 1、2、3，非法值会拉回默认。默认是 3。源码注释：1 是联网加刷卡，2 是只认本地卡，3 是即插即充。</p>
+  <ul>
+    <li>模式 1：刷卡和 OCPP 远程启动都能开始。远程启动、远程停止里多处判断 <code>chargemode == 1</code> 才真正改授权位。未登录时等待灯是黄的，登录成功变蓝。</li>
+    <li>模式 2：只认绑定卡、桩卡、充电卡，不发 Authorize。</li>
+    <li>模式 3：刷卡函数直接空返回。远程停止回 Accepted，但清 <code>on_charging</code> 的代码被注释。也没有插枪自动置授权的代码。所以“即插即充”目前只停留在模式定义上。</li>
+  </ul>
+</section>
+<section id="rfid">
+  <h2>4.2 刷卡</h2>
+  <p>未插枪且处于等待时，管理员加卡可以进入或退出绑卡。绑卡状态下再刷一张不在名单里的卡，就追加到 <code>sys_param.idtag</code> 并请求存参数。管理员清卡把名单清空。绑卡中等待灯是青色。强制计数很大时，进绑卡还会先把旧名单清掉。</p>
+  <p>模式 1 启动：当前是等待或结束，且还没有授权；或者处于预约且卡号与预约身份匹配。然后：</p>
+  <ol>
+    <li>桩卡、充电桩卡或已绑定卡：<code>auth_type = 1</code>，写入卡号，授权位置 1，蜂鸣。</li>
+    <li>否则若已经 Boot 成功：开了本地预授权且本地鉴权通过，直接启动；否则只把 Authorize 发送标志置 1，等平台结果。平台接受才置授权，拒绝则清授权，原因 DeAuthorized。</li>
+    <li>未登录且允许离线本地授权：本地通过就启动。本地结果为未知、且允许未知身份离线交易，也启动，<code>auth_type = 2</code>。这种身份若充电量超过 <code>MaxEnergyOnInvalidId</code>，充电任务会自己停掉。</li>
+  </ol>
+  <p>模式 1 停止：已经在充电授权中，再刷到桩卡、充电桩卡、同一张卡，或本地校验认为是同一用户，清授权，原因 Local。</p>
+  <p>模式 2：启动条件另有 <code>check_rfid_start_charge</code>，卡必须是绑定卡、桩卡或充电卡。停止看同一张卡或管理员卡。</p>
+  <p>被接受的刷卡响一档蜂鸣，没走进启动或停止的刷卡响另一档。不在准备、充电、暂停时，每秒刷新授权缓存和 OCPP 本地授权名单。</p>
+</section>
+<section id="other">
+  <h2>4.3 远程、蓝牙、光伏、离线</h2>
+  <p>远程启动只接受主连接、模式 1、连接器 0 或 1、状态为等待/预约/准备/结束。已在充且 idTag 不同则拒绝。预约中卡号还必须对上。可以附带一条 TxProfile。接受后写 idTag、蜂鸣、授权位置 1。远程停止同样只在模式 1 且交易号一致时清授权，原因 Remote。</p>
+  <p>蓝牙命令“1”在等待或准备时用免费身份 <code>freeIdTag</code> 启动，“2”在充电、暂停或结束时停止，原因 Local。光伏和离线自动充电也使用这个免费身份，条件见<a href="energy.html">负载</a>和下面这句：离线时间参数为 0，或 Boot 已经接受，就不自动充；否则从断开时刻起超过设定分钟数，且插枪超过 3 秒、状态为等待、尚未授权，才置授权。</p>
+</section>
+<section id="meter">
+  <h2>4.4 电表</h2>
+  <p><code>energy_meter_process</code> 每 100 ms 被调用。拨码 <code>bcd3_state</code> 为 0 时函数直接返回，注释写明这条路径未使用。否则按参数改波特率和地址。30 秒还识别不到电表，就把电表超时计数设到 31，从而触发上一章的电表故障。</p>
+  <p>识别到电表后大约每 500 ms 读一次。进入充电时存起始电量；充电中每 10 秒、进入结束后约 3 秒，再存交易电量和光伏电量。结束日志打印 <code>meter_stop</code>。另一路 485 是从站 <code>RS485_slave_process</code>，给外部主机查询，和电表轮询不是同一个函数。</p>
+  <p>清单写的板载计量芯片不支持，程序也不靠它做结算电量。</p>
+  <p><a href="ocpp.html">下一章：这些状态变化怎样变成 OCPP 报文</a></p>
+</section>
+</main>
+</body>
+</html>

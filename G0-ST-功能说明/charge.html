@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>1. 充电控制</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <h1>1. 充电控制</h1>
+  <p>代码在 <code>Charging_Task.c</code>。状态枚举：等待、准备、充电、暂停、结束、故障、预约、不可用。</p>
+</header>
+<nav class="top">
+  <a href="index.html">目录</a>
+  <a href="charge.html">充电</a>
+  <a href="output.html">输出</a>
+  <a href="protect.html">保护</a>
+  <a href="auth.html">授权</a>
+  <a href="ocpp.html">OCPP</a>
+  <a href="network.html">网络</a>
+  <a href="energy.html">负载</a>
+  <a href="system.html">系统</a>
+</nav>
+<main>
+<section id="task">
+  <h2>1.1 每毫秒任务的顺序</h2>
+  <p><code>Charging_task</code> 由主循环 1 ms 节拍调用。一次调用里严格按这个顺序做，后面的步骤看得到前面改过的状态：</p>
+  <ol>
+    <li><code>sysfault_check_proc</code>：根据采样和开关量刷新故障位。</li>
+    <li><code>sysfault_set_ocpp_fault</code>：把故障写成 OCPP 要用的错误码。</li>
+    <li>按 <code>CHARGE_STATE</code> 进入对应状态函数。状态函数只改状态和几个控制位，不直接算占空比。</li>
+    <li>刷新 0 号连接器：有故障报 Faulted，不可用报 Unavailable，否则 Available。这和枪上的状态不是同一个变量。</li>
+    <li><code>set_current_proc</code>：按控制位和各种上限算出 CP 电流，见<a href="output.html">输出</a>。</li>
+    <li><code>set_contactor_proc</code>：按接触器允许位驱动继电器。</li>
+    <li><code>set_led_proc</code>：按故障码和状态刷灯。</li>
+  </ol>
+  <p>所以“进了充电态”和“接触器已经吸合”不是同一拍里必然同时发生。充电态函数把 <code>contactor_enable</code> 置 1 之后，要等电流合成结果不小于 6A，接触器才会合。</p>
+</section>
+<section id="plug">
+  <h2>1.2 怎样算插上枪</h2>
+  <p>插枪标志是 <code>bChargerConnect</code>，在 CP 检测函数里维护，不在状态机里维护。</p>
+  <ul>
+    <li>CP 电压约 10.5～13.5V 记为断开（12V），7.5～10.5V 记为准备（9V），4.5～7.5V 记为充电中（6V），其余记为未知。</li>
+    <li>没开枪线识别时：CP 不是断开、也不是未知，就算插枪。</li>
+    <li>开了枪线识别时：PP 为未插枪则强制未连接；否则仍看 CP 是不是 9V 或 6V。</li>
+  </ul>
+  <p>插枪沿变化时记下 <code>ev_connect_tick</code>，并允许 PE 接触器。拔枪沿记下断开时刻，并清电子锁失败标志。光伏和离线自动充电都要求插枪超过 3 秒才启动，用的就是这个时刻。</p>
+</section>
+<section id="authbit">
+  <h2>1.3 授权位</h2>
+  <p><code>on_charging</code> 是“允许开始或继续这次充电”的开关，不是“接触器已经合上”。等待态只有它为 1，并且 <code>check_start_charge_condition</code> 看到已经插枪，才切到准备。</p>
+  <p>置 1 的路径：</p>
+  <ul>
+    <li>模式 1 刷卡：桩卡、绑定卡，或本地预授权通过，直接置 1。普通卡已登录时只发 Authorize，要等平台回接受才置 1。离线且允许未知身份时也会置 1，并把 <code>auth_type</code> 设为 2。</li>
+    <li>模式 2 刷卡：绑定卡、桩卡、充电卡直接置 1，不发 Authorize。</li>
+    <li>OCPP 远程启动：仅充电模式为 1、且是主连接时接受，写入 idTag 后置 1。</li>
+    <li>蓝牙充电控制命令为“1”，且当前是等待或准备：用免费身份置 1。</li>
+    <li>光伏：富余电流和当前允许电流都不小于 6A，插枪超过 3 秒，尚未授权，状态是等待或结束。</li>
+    <li>离线自动充电：Boot 未被接受，离线时间参数大于 0，断线超过该分钟数，插枪超过 3 秒，状态是等待。</li>
+  </ul>
+  <p>清 0 的路径：拔枪（停止原因 EVDisconnected）、远程停止（仅模式 1，原因 Remote）、蓝牙命令“2”（原因 Local）、同卡或管理员卡再次刷卡（原因 Local）、Authorize 被拒绝、无效身份充电量超过 <code>MaxEnergyOnInvalidId</code>。模式 3 的远程停止只回 Accepted，清授权的语句被注释掉了。</p>
+  <p>授权之后如果一直不满足启动条件，等待函数用 <code>ocpp_ConnectionTimeOut</code> 秒倒计时，超时也清授权，原因同样记成车断开。</p>
+  <div class="note">模式 3 的注释写的是即插即充，刷卡分支是空的。源码里没有“CP 一变成 9V 就把 on_charging 置 1”的语句。出厂默认模式就是 3。清单写的插枪即充，在当前程序里没有一条完整自动启动路径。</div>
+</section>
+<section id="states">
+  <h2>1.4 八个状态</h2>
+  <p>故障检查的返回值决定很多出口。返回 1 是停机类：漏电、PEN、过流、接地、继电器、断路、CP 异常、急停，以及电子锁故障超过 30 秒。返回 2 是告警类：过温、过压、欠压、防拆、电表、二极管，以及电子锁故障的前 30 秒。返回 3 只表示负载均衡通信故障，状态机不因此改变状态。计时全部用 <code>GetTick()</code>，单位毫秒。</p>
+
+  <h3 id="wait">等待</h3>
+  <p><code>charge_waiting</code> 一进来就关电子锁允许、断交流接触器、关 PWM，并复位动态负载电流。然后：</p>
+  <ul>
+    <li>返回 1 或 2：进入故障。告警在等待态也进故障，这一点和准备、充电不同。</li>
+    <li><code>unavailable_enable</code>：进入不可用。</li>
+    <li><code>reserved_enable</code>：进入预约。</li>
+    <li>已授权且已插枪：清停止原因，请求一次漏电自检，记下会话起点，二极管标志清 0，进入准备。</li>
+  </ul>
+  <p>已插枪或已授权时，对外状态是 Preparing，否则是 Available。</p>
+
+  <h3 id="prepare">准备</h3>
+  <p><code>charge_preparing</code> 把 PWM 允许位置 1，接触器仍断开，并走电子锁流程。返回 1、不可用、预约或停止条件成立：关 PWM、清授权，进入结束。返回 2：进入暂停，PWM 允许位保持。否则停留在准备，对外状态 Preparing。</p>
+  <p>进入充电要同时满足五条，缺一条就继续等：</p>
+  <ol>
+    <li>CP 为 6V。</li>
+    <li>本拍合成出的 PWM 电流不小于 6A。电流还没起来时不会进充电，也就不会吸接触器。</li>
+    <li>上面两条已经持续至少 600 ms。</li>
+    <li>二极管检查通过。<code>protection_disable</code> 的 bit0 置位才做检查，否则直接把标志置成通过。</li>
+    <li>漏电自检成功。自检请求只在进入准备时置一次。</li>
+  </ol>
+  <p>这些条件连续 10 秒都不成立，进入暂停。满足后记下开始时间，置 <code>is_charging</code>，保存一次电量和光伏电量，进入充电。</p>
+
+  <h3 id="charging">充电</h3>
+  <p><code>charge_charging</code> 把锁允许、PWM 允许置 1。PWM 电流不小于 6A 时置交流接触器允许，并置 PE 接触器允许。每过 1 秒给充电时间加 1，每 10 秒再存一次电量。对外状态 Charging。</p>
+  <ul>
+    <li>返回 1：立刻关 PWM、断接触器，进入结束。</li>
+    <li>返回 2：进入暂停。暂停函数会把接触器允许清掉，PWM 允许保持。</li>
+    <li>CP 回到 9V：正式编译里阈值是 1 ms，几乎立刻进暂停。TEST_CE 宏下是 800 ms。</li>
+    <li>停止条件成立：先关 PWM。任一相电流采样仍不小于 100（按注释即 1A）时，断开前等待从 200 ms 加到 6200 ms。这段等待里如果 CP 仍是 6V，函数直接返回，人还留在充电态，但 PWM 已经关掉。</li>
+  </ul>
+
+  <h3 id="suspend">暂停</h3>
+  <p><code>charge_suspending</code> 保持 PWM 允许，断开交流接触器，复位动态负载电流。返回 1 或停止条件：关 PWM，进入结束。没有停机故障、CP 回到 6V、电流不小于 6A，并持续 600 ms：回到充电。</p>
+  <p>对外：过压报 SuspendedEVSE/OverVoltage，欠压 UnderVoltage，过温 HighTemperature，防拆 OtherError。电流为 0 或已经判定桩侧暂停时报 SuspendedEVSE。其余（车把 CP 抬到 9V）报 SuspendedEV，错误码 EVCommunicationError。</p>
+
+  <h3 id="finish">结束</h3>
+  <p><code>charge_finishing</code> 先停大约 3 秒，再保存一次电量。没有返回 1/2 时对外是 Finishing。故障还在时对外改成 Faulted：继电器或断路对应 PowerSwitchFailure，接地 GroundFailure，过流 OverCurrentFailure，过压 OverVoltage，欠压 UnderVoltage，过温 HighTemperature，其余 OtherError。</p>
+  <p>插枪且电子锁故障：不再允许上锁，并置锁失败。停止条件成立后清 <code>is_charging</code>、放开锁，进入“等拔枪”。枪还插着、又没有新的授权，就一直停在结束。只有拔枪，或者 <code>on_charging</code> 再次变成 1，才回到等待。</p>
+
+  <h3 id="fault">故障、预约、不可用</h3>
+  <p>故障态在故障位还在时置 <code>fault_stop</code>。全部故障位清除后回到等待。预约态如果已经授权，清预约标志并回等待，好让正常启动再走一遍。当前时间到达 <code>reserve_time</code>、出现故障、或预约标志被清掉，也回等待，对外 Reserved。不可用态出现故障或标志被清掉就回等待；没有故障时对外 Unavailable/OtherError。</p>
+</section>
+<section id="stop">
+  <h2>1.5 停止原因和报给平台的状态</h2>
+  <p><code>stop_reason_set</code> 只在当前原因仍是 Other 时写入，所以先发生的原因不会被后面的覆盖。拔枪写 EVDisconnected，远程停止写 Remote，本地刷卡或蓝牙停止写 Local，授权失败或无效身份超额写 DeAuthorized。枚举里还有急停、硬复位、掉电、软复位、解锁命令，是否写入取决于对应调用点有没有执行到。</p>
+  <p>枪状态（1 号）由各状态函数用 <code>SET_OCPP_STATE</code> 写。0 号连接器在任务末尾单独写，只区分故障、不可用和可用。平台看到的 StatusNotification 用的是这些状态变化，触发点在 <a href="ocpp.html">OCPP</a>。</p>
+  <p><a href="output.html">下一章：电流、占空比和接触器</a></p>
+</section>
+</main>
+</body>
+</html>

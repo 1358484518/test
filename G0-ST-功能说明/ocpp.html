@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>5. OCPP</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <h1>5. OCPP</h1>
+  <p>任务在 <code>OCPP_Task</code>，每 5 ms 进入。报文组包在 <code>OCPP_Handle.c</code>。握手在 <code>WebSocket_Handle.c</code>。</p>
+</header>
+<nav class="top">
+  <a href="index.html">目录</a>
+  <a href="charge.html">充电</a>
+  <a href="output.html">输出</a>
+  <a href="protect.html">保护</a>
+  <a href="auth.html">授权</a>
+  <a href="ocpp.html">OCPP</a>
+  <a href="network.html">网络</a>
+  <a href="energy.html">负载</a>
+  <a href="system.html">系统</a>
+</nav>
+<main>
+<section id="link">
+  <h2>5.1 什么时候才开始说话</h2>
+  <p>每 5 ms 都会进 <code>OCPP_Task</code>，但多数时候只做断线判断。要同时满足才发 WebSocket 握手：<code>net_check</code> 为真，并且重连倒计时已经减到 0。</p>
+  <ul>
+    <li>地址不是 wss：<code>net_check</code> 看当前接口的 TCP 是否已连接。WiFi 上这个标志只在 BW20 的 <code>AT+SOCKET</code> 成功回调里置 1，见<a href="network.html">网络</a>。</li>
+    <li>地址以 wss 开头：还要看 TLS 是否握手完成。TLS 在主芯片上跑，不在模组上跑。</li>
+  </ul>
+  <p>握手是 HTTP 升级。大约 15 秒没完成算失败，连续 10 次失败会把发送超时计数设成 3，从而走断线。平台回 101 且校验通过后 <code>handshake_accept</code> 置 1，下一拍才进 <code>OCPP_Core_Handle</code>。</p>
+  <p>发送超时累计 3 次，或 <code>net_check</code> 变假：若曾经握手成功且没有离线记录堆积，先把进行中的电量、开始、结束存到本地，再断开，重连计数设为 200。任务每 5 ms 减 1，大约空等 1 秒再允许握手。</p>
+</section>
+<section id="call">
+  <h2>5.2 桩主动发的报文</h2>
+  <p>发送状态不是空闲时，本拍不再挑新报文。同一时刻只有一条在等平台应答。超时后按上一条类型把对应标志再置上。</p>
+  <h3>BootNotification</h3>
+  <p>上电 <code>OCPP_Init</code> 就把发送标志置 1，但要握手成功且发送空闲才真正发出。平台接受后补一条 StatusNotification，心跳间隔改成平台给的值，并认为登录成功。平台拒绝则按返回的间隔重发。TriggerMessage 指定 Boot 时也会再发。</p>
+  <h3>StatusNotification</h3>
+  <p>充电状态变化、0 号连接器状态变化、故障码变化，都会置标志。Boot 被接受后也会补一条。心跳间隔配成 0 或大于 3600 秒时，大约每小时再发一条。TriggerMessage 指定状态通知且连接器是 0 或 1 时接受。</p>
+  <h3>Heartbeat</h3>
+  <p>定时器到期，且 Boot 已被接受、不在固件下载中，才置标志。间隔就是 <code>ocpp_HeartbeatInterval</code>。充电中如果心跳间隔等于电量采样间隔，心跳会再错开 5 秒，避免两条报文叠在同一拍。TriggerMessage 也可以立刻要一条心跳。</p>
+  <h3>Authorize、StartTransaction、StopTransaction、MeterValues</h3>
+  <p>Authorize 主要由模式 1 的刷卡置标志，平台接受后才把授权位置 1。StartTransaction：没有离线记录要补、且进入充电/准备/暂停、还没有开始过这次交易。StopTransaction：进入结束且这次交易已经开始过。MeterValues：充电或暂停中，采样间隔大于 0，第一次立即发并启动周期定时器。离线记录还没补完时，不发这三条文，改为在本地按同样的状态变化记账，登录后再补。</p>
+  <h3>DataTransfer</h3>
+  <p>三种用途，用类型号区分：调试事件；按 <code>ocpp_GetCTClampInterval</code> 上报钳形电流，Boot 已接受且不在下载中；光伏模式在开始交易或结束交易被平台接受后，再发一条太阳能数据。钳形电流若配置成要二次交互，收到应答后还会再发一拍。</p>
+  <h3>固件、诊断、安全事件</h3>
+  <p>固件状态变化调用 <code>fw_status_notify</code>，发 FirmwareStatusNotification。签名固件有单独的 SignedFirmwareStatusNotification。下载过程中，普通主动报文停掉，只放行固件状态和 StatusNotification。清单写签名升级不支持，源码里收包和状态上报函数都在。</p>
+  <p>DiagnosticsStatusNotification 不是周期报文，也不能被 TriggerMessage 触发（那种请求会 Rejected）。平台先发 GetDiagnostics，桩回带文件名的 CallResult，并把上传使能打开。桩不在充电、准备、暂停、结束，且 OCPP 发送空闲时才真正传文件。状态变成上传中、失败、已上传时各发一条；已上传后再延时补一条空闲。</p>
+  <p>SecurityEventNotification：防拆上升沿，或 TLS 证书校验失败。类型包括 TamperDetectionActivated、固件签名证书无效、固件签名无效。清单写这项不支持，源码会发。</p>
+  <p>收到的 Call 解析失败时回 CallError。WebSocket Ping 不是 OCPP 报文，Boot 已接受且不在下载时按 <code>ocpp_WebSocketPingInterval</code> 发。</p>
+</section>
+<section id="reply">
+  <h2>5.3 平台下发</h2>
+  <p>桩回复 CallResult 的有：CancelReservation、ChangeAvailability、ChangeConfiguration、ClearCache、ClearChargingProfile、DataTransfer、GetCompositeSchedule、GetConfiguration、GetDiagnostics、GetLocalListVersion、RemoteStartTransaction、RemoteStopTransaction、ReserveNow、Reset、SendLocalList、SetChargingProfile、TriggerMessage、UnlockConnector、UpdateFirmware、SignedUpdateFirmware。格式不对回 CallError。</p>
+  <p>TriggerMessage 只接受 Boot、心跳、MeterValues、StatusNotification。改可用状态、预约会去改充电状态机里的不可用标志和预约标志。改配置经过 <code>ParamCheck</code>，不合法的值不写入。下发的充电计划进 Flash，由<a href="energy.html">负载一章</a>的 500 ms 任务变成电流上限。</p>
+  <p>清单里的 GetLog、LogStatusNotification 标成支持，是因为有本地日志。源码没有这两个报文名。日志是 <code>log_record</code>，按平台要求上传走的是 GetDiagnostics。</p>
+</section>
+<section id="offline">
+  <h2>5.4 断网补传和第二路</h2>
+  <p>未登录时，开始、结束、电量记在本地记录里，不组 OCPP 报文。登录成功后如果记录条数不为 0，置离线交易存在，发送队列优先把这些记录补成 StartTransaction、StopTransaction、MeterValues。本地授权缓存和 SendLocalList 下发的名单在非充电过程中每秒刷新。</p>
+  <p>清单写双平台不支持。源码在 <code>ocpp_admin_mode &gt; 0</code> 时对第二路做同样的握手。第二路只发 Boot、Status、Heartbeat、DataTransfer，以及固件、诊断、安全事件，不发启停交易和 MeterValues。管理地址同样可以是 wss。</p>
+  <p><a href="network.html">下一章：报文从哪条链路发出去</a></p>
+</section>
+</main>
+</body>
+</html>

@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>6. 网络与蓝牙</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <h1>6. 网络与蓝牙</h1>
+  <p>正常主循环每 5 ms 调用 <code>wifi_ble_task()</code>，模组按 BW20 的 AT 命令在跑。旧的 <code>esp32_process()</code> 只在测试模式里调用。清单写的是板上焊死 ESP32、不支持两种模组自动切换。</p>
+</header>
+<nav class="top">
+  <a href="index.html">目录</a>
+  <a href="charge.html">充电</a>
+  <a href="output.html">输出</a>
+  <a href="protect.html">保护</a>
+  <a href="auth.html">授权</a>
+  <a href="ocpp.html">OCPP</a>
+  <a href="network.html">网络</a>
+  <a href="energy.html">负载</a>
+  <a href="system.html">系统</a>
+</nav>
+<main>
+<section id="share">
+  <h2>6.1 蓝牙和 WiFi 怎么共用串口</h2>
+  <p>只有一根 UART。程序不把时间切成固定时隙，而是保证同一时刻只有一条 AT 命令在等应答。</p>
+  <p><code>wifi_ble_task</code> 先跑 <code>bw20_handle</code>，再跑 <code>at_parser_process</code> 消化串口字节。初始化完成后进入循环态，每次都先调用 <code>wifi_tcp_handle</code>，再调用 <code>ble_handle</code>。两边都通过 <code>at_send_command</code> 发命令。若 <code>cmd_pending</code> 已经为真，函数直接返回失败，状态机留在原状态，5 ms 后再试。收到 OK、ERROR、READY，或等待超时，才把占用清掉。</p>
+  <p>因为 WiFi 写在前面，同一拍两边都要发、且通道空闲时，这一拍归 WiFi。WiFi 发送是两拍：先 <code>AT+SOCKETSEND</code>，等到提示符 <code>&gt;</code> 再发数据，直到 OK 才回到可发送状态。蓝牙回手机数据同样是 <code>AT+BLESENDRAW</code> 再等 <code>&gt;</code>。这两拍期间占用不释放，另一边插不进来。</p>
+  <p>下行不占这条命令锁。解析器从同一段字节流里拆：蓝牙 <code>+DATA</code> 进 <code>bt_rx_buf</code> 再交给 <code>BT_Task</code>；socket 下行进 TCP 缓冲；<code>+EVENT</code> 更新连上、断开、拿到 IP。所以接收可以和一条正在等待的 AT 叠在一起，只有主动发命令才串行。</p>
+  <p>广播打开之后，蓝牙停在等连接，不再发 AT。只有 <code>bt_tx_len &gt; 0</code> 才来抢命令槽。空闲时通道给 WiFi 做连路由、查 socket、发 OCPP。</p>
+</section>
+<section id="wifi">
+  <h2>6.2 WiFi 怎样把 OCPP 连上</h2>
+  <ol>
+    <li>未连上路由时，大约每 30 秒发一次 <code>AT+WJAP</code>。</li>
+    <li>已关联后等拿到网，或最多再等 25 秒，发 <code>AT+WJAP?</code> 读 IP。</li>
+    <li>读到 IP 后发 <code>AT+SOCKET=3,502</code>，打开本机 Modbus 端口。</li>
+    <li>读 <code>AT+WRSSI</code>。信号小于 0 且 OCPP 这条 TCP 还没连上，才发 <code>AT+SOCKET=4,主机,端口</code>。</li>
+    <li>应答里出现 connect success：<code>tcp_connected[INTF_WIFI_ESP32]</code> 置 1，状态进入可发送。从这一拍起，OCPP 的 <code>net_check</code> 才可能为真。</li>
+  </ol>
+  <p>OCPP 组好的字节在 <code>tcp_tx_buf</code>。状态处于可发送且长度大于 0 时，才发 SOCKETSEND。通道被蓝牙或上一条命令占着时，数据留在缓冲里。</p>
+  <p>已连接后又 20 分钟没有 OCPP 收包，并且当前上网接口是 WiFi，BW20 发 <code>AT+RST</code> 复位模组。这不是清单里写的“空闲 60 分钟重启整机”。另外大约 3 分钟会查一次 socket 状态。旧 ESP32 初始化里有 <code>AT+RESTORE</code>，当前这条 BW20 路径复位用的是 <code>AT+RST</code>。</p>
+</section>
+<section id="switch">
+  <h2>6.3 三种接口怎么选</h2>
+  <p>重新配置时按使能位选择起点：开了局域网就用 W5500，否则开了 WiFi 就用 BW20，否则用 4G。地址以 wss 开头则这条连接走 TLS。</p>
+  <p>运行中 <code>net_switch_process</code> 按谁已经 TCP 连上做切换，不是按信号强度：</p>
+  <ul>
+    <li>正在用 4G，有线或 WiFi 连上了，就切过去，并断开 4G 这条。</li>
+    <li>正在用 WiFi，有线连上了，就切到有线。</li>
+    <li>有线或 WiFi 掉成“需要换路”时，先试 WiFi，再试 4G。</li>
+  </ul>
+  <p>切换会复位对应连接，OCPP 要重新握手。蓝牙连上手机、而当前上网不是 WiFi 时，会暂时把 WiFi 串口中断优先级抬高，方便配置；蓝牙断开后再按当前上网接口把优先级放回 4G 或以太网。WiFi 模组升级进行到后半段、且当前接口是 WiFi 时，<code>net_process</code> 直接返回，避免和升级抢串口。</p>
+  <p>4G 状态机在 1 ms 的 <code>SIM_Task</code>。以太网在 5 ms 的 <code>LAN_Manager</code>，里面带网页服务。OCPP 字节只从 <code>net_interface</code> 指向的那一条出去。</p>
+</section>
+<section id="bt">
+  <h2>6.4 蓝牙配置协议</h2>
+  <p>手机数据进 <code>BT_Task</code>。会话类有连接、退出、密码、改密码、读设备信息。配置类写完参数后，应答仍要经 <code>AT+BLESENDRAW</code> 发出，因此会和 OCPP 的 SOCKETSEND 互相等待。</p>
+  <p>能改的内容：WiFi 名和密码、服务器地址和账号、额定电流、4G、充电模式、动态负载、家庭均衡、光伏、免费身份、充电时段、上网方式、局域网参数、序列号、相序、保护屏蔽、RFID 名单增删查，以及充电启停、电子锁、蜂鸣器、恢复出厂、读 AP 列表。协议里还有固件升级请求、下载、校验三条命令。清单写蓝牙升级不支持、走 cptool，这三条命令在源码里是有的。</p>
+  <p><a href="energy.html">下一章：这些电流上限从哪来</a></p>
+</section>
+</main>
+</body>
+</html>

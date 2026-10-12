@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>2. 输出</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <h1>2. PWM、接触器、电子锁、灯</h1>
+  <p>状态机只改允许位。真正的电流、占空比、继电器和灯在任务末尾的三个函数里。</p>
+</header>
+<nav class="top">
+  <a href="index.html">目录</a>
+  <a href="charge.html">充电</a>
+  <a href="output.html">输出</a>
+  <a href="protect.html">保护</a>
+  <a href="auth.html">授权</a>
+  <a href="ocpp.html">OCPP</a>
+  <a href="network.html">网络</a>
+  <a href="energy.html">负载</a>
+  <a href="system.html">系统</a>
+</nav>
+<main>
+<section id="current">
+  <h2>2.1 电流怎么合成</h2>
+  <p><code>set_current_proc</code> 每 1 ms 执行。起点是 <code>sys_param.rated_current</code>。若 <code>pwm_enable</code> 为 0，电流直接变成 0，后面的上限全部跳过。等待、结束和停机出口都会把这个允许位关掉，所以那些状态下 CP 不会发方波。</p>
+  <p>允许输出时，按下面顺序往下裁，后一步看不到被前一步丢掉的更大值：</p>
+  <ol>
+    <li>充电计划有效（<code>sc_profile_valid</code>）：开了光伏就取计划电流和光伏电流的较大值，否则只用计划电流。计划无效但开了光伏，就用光伏电流。两项都关着就保持额定电流。</li>
+    <li>不超过 <code>dlm_current</code>（家庭动态负载，见<a href="energy.html">负载</a>）。</li>
+    <li>再不超过额定电流。</li>
+    <li>打开枪线识别时，不超过 PP 档位，档位只有 13A、20A、32A、63A。</li>
+    <li>允许降功率，且内部温度已经达到“保护温度减 5℃”并持续 5 秒：不超过额定电流的一半。温度回到“保护温度减 12℃”以下才取消降功率。温度读数 4095 视为无效，不降功率也不报过温。</li>
+    <li>小于 6A 先变成 0。这个值记入 <code>demand_current</code>。</li>
+    <li>再不超过 <code>dlb_current</code>（桩群均衡）。小于 6A 再变成 0。</li>
+  </ol>
+  <p>结果和上次不同才更新 <code>pwm_current</code> 并打日志。准备态进充电、充电态吸接触器，看的都是这个最终值，不是额定电流。</p>
+</section>
+<section id="duty">
+  <h2>2.2 占空比</h2>
+  <p><code>pwm_current</code> 大于 0 时调用 <code>CP_PWM_SetCurrent</code>。函数内部再把电流夹到 6～63A，所以调用方传入 0 不能走这里，否则会被抬成 6A。</p>
+  <ul>
+    <li>6～51A：占空比百分数 = 电流 / 0.6。</li>
+    <li>大于 51A 到 63A：占空比百分数 = 电流 / 2.5 + 64。</li>
+    <li>百分数乘 10，写入 TIM3 通道 3 的比较寄存器。周期寄存器是 999，比较值 0～1000 对应 0%～100%，步进 0.1%。</li>
+  </ul>
+  <p>例子：6A → 10% → 比较值 100；32A → 约 53.3% → 533；63A → 89.2% → 892。这是 IEC 61851-1 的电流通告，程序上限停在 63A，没有做到标准里的 80A。</p>
+  <p>电流为 0 时调用 <code>CP_PWM_SetDuty(1000)</code>。比较值被限制不超过 1000；等于 1000 时软件记录的 CP 电流清 0。CP 保持高电平，不再发 1 kHz 方波，车辆看到的可用电流是 0。等待、暂停以外的停机、以及电流被限制到 6A 以下，都走这条。</p>
+  <p>各状态对 PWM 允许位：等待关掉；准备、充电、暂停打开；结束和停机出口关掉。准备进充电额外要求合成电流已经 ≥ 6A，所以占空比还是 100% 稳态时不会吸接触器。</p>
+</section>
+<section id="relay">
+  <h2>2.3 接触器</h2>
+  <p>交流接触器允许位只在充电态、且 <code>pwm_current ≥ 6</code> 时为 1，同时 PE 接触器允许位置 1。准备、暂停、等待把交流接触器允许位清 0。真正拉 GPIO 的是 <code>set_contactor_proc</code>。</p>
+  <p>从充电停下来时，充电函数先关 PWM，不立刻断接触器。任一相电流仍 ≥ 1A（采样值 100）时，等待从 200 ms 延长到 6200 ms，避免带电流拉开。单相只看 <code>relay_state</code>，三相任一路反馈为合都算接触器在合。校准模式可以绕过状态机，单独强制继电器。</p>
+  <p>上电还有一段 PE 接触器是否存在的检测：故障检测允许之后，大约 200 ms 窗口里数 PE 继电器反馈。</p>
+</section>
+<section id="lock">
+  <h2>2.4 电子锁</h2>
+  <p>锁电机两路方向 PWM：上锁时一侧为 0、另一侧输出占空比；解锁对调。过程中占空比在 100%、72%、95%、50% 之间按 <code>Get_Wait_Time</code> 切换。准备态调用上锁流程，充电态 <code>lock_enable</code> 为 1。结束且锁故障、枪还插着时禁止再上锁，并置 <code>elock_lock_failed</code>。</p>
+  <p>锁故障发生后的 30 秒内，故障检查返回 2，充电中会进暂停而不是直接结束。超过 30 秒返回 1，按停机处理。掉电有单独的解锁路径。</p>
+</section>
+<section id="led">
+  <h2>2.5 灯和蜂鸣器</h2>
+  <p><code>set_led_proc</code> 的优先级从高到低：</p>
+  <ol>
+    <li>漏电自检提示：先紫灯常亮约 2 秒；自检成功再绿灯闪约 5 秒。</li>
+    <li>WiFi 复位标志：黄灯常亮。</li>
+    <li>故障码不是 13：红灯按故障码次数闪。13（负载均衡通信）是紫灯闪。故障码对照见<a href="protect.html">保护</a>。</li>
+    <li>否则按充电状态：等待且未插枪，绑卡中青灯；模式 1 且还没登录成功是黄灯，已登录是蓝灯；其它模式蓝灯常亮。已插枪的等待、准备、暂停是蓝灯闪。充电是绿灯流水。结束是绿灯慢闪。预约是蓝灯慢闪。不可用是红灯常亮。</li>
+  </ol>
+  <p>刷卡被接受、远程启停会置蜂鸣标志，蜂鸣器由定时器 PWM 驱动。刷卡被拒绝响的是另一档。</p>
+  <p><a href="protect.html">下一章：保护怎样把桩送进暂停或结束</a></p>
+</section>
+</main>
+</body>
+</html>

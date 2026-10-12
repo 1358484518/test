@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>7. 负载、光伏、充电计划</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <h1>7. 负载、光伏、充电计划</h1>
+  <p>这三项都不直接吸接触器。它们只改电流上限，由<a href="output.html">输出一章</a>的 <code>set_current_proc</code> 收成 CP 占空比。</p>
+</header>
+<nav class="top">
+  <a href="index.html">目录</a>
+  <a href="charge.html">充电</a>
+  <a href="output.html">输出</a>
+  <a href="protect.html">保护</a>
+  <a href="auth.html">授权</a>
+  <a href="ocpp.html">OCPP</a>
+  <a href="network.html">网络</a>
+  <a href="energy.html">负载</a>
+  <a href="system.html">系统</a>
+</nav>
+<main>
+<section id="dlm">
+  <h2>7.1 家庭动态负载</h2>
+  <p><code>dlm_process</code> 每 100 ms 运行。 <code>power_distribution_enable</code> 为 0 时，<code>dlm_current</code> 等于额定电流，等于不限制。</p>
+  <p>打开后，家庭最大电流先减 2A，再减去其它负载电流，得到桩还能用的电流。小于 0 就当 0。要减小输出时不立刻改：差值大于 5A 时滞回大约 0～5 秒，差值更小则大约 5～10 秒（以 100 ms 为一步去数）。时间到了才把 <code>dlm_current</code> 写成新值，奇数还会再减 1A，避免在两个整数之间抖。增大方向也有计数，避免刚减完又加回去。</p>
+  <p>这个电流在 PWM 合成里排在计划和光伏之后、枪线 PP 之前。</p>
+</section>
+<section id="solar">
+  <h2>7.2 光伏</h2>
+  <p><code>solar_charging_process</code> 同样 100 ms。 <code>solar_mode</code> 为 0 时，光伏电流等于额定电流，后面合成时不会被光伏拉低。</p>
+  <p>打开后先把富余功率除以相电压，折成电流。单相用 L1 电压。三相且车是三相时用三相电压之和，否则仍用 L1。再叠加“允许从电网取的电流”：该参数不大于 0 时，提供电流等于该参数加上富余电流；参数大于 0 且富余为负时，只给参数里的那一段电网电流。</p>
+  <p>升降也有滞回计数，不每 100 ms 改一次 PWM。另外一条启动逻辑：提供电流和当前光伏电流都不小于 6A，枪已插超过 3 秒，还没有授权，状态是等待或结束，就把授权位置 1，身份用免费 idTag。这是光伏自己的“有富余就充”，不经过刷卡。</p>
+  <p>光伏交易被平台接受开始或接受结束之后，还会发一条 DataTransfer，把太阳能电量报出去。</p>
+</section>
+<section id="profile">
+  <h2>7.3 OCPP 充电计划</h2>
+  <p>平台 SetChargingProfile 写下的计划存在 Flash。每 500 ms，<code>check_ChargingProfile_valid</code> 看当前时间是否落在计划里，<code>calc_ChargingProfile_limit</code> 得到 <code>sc_maxcurrent</code>，并置 <code>sc_profile_valid</code>。可以按用途、堆栈等级、计划号删除，GetCompositeSchedule 把多条计划合成成一条给平台看。</p>
+  <p>计划有效时，PWM 合成用它替换额定电流。若同时开了光伏，取计划电流和光伏电流里较大的一个，也就是计划不会把光伏允许的更大电流裁掉。远程启动若带了 TxProfile，先放进计划表，同样走这 500 ms 的计算。</p>
+</section>
+<section id="dlb">
+  <h2>7.4 桩群均衡</h2>
+  <p><code>dlb_current</code> 是 PWM 合成的最后一道上限，在需求电流已经记下来之后再裁一次，小于 6A 就变成 0，CP 回到稳态高电平。通信失败置故障返回值 3，不改变充电状态，只亮紫灯。清单把这项标成待定，检测和灯语在源码里有，但是否因此停充：不会。</p>
+  <p>清单里的 HEMS：按外部指令减电流的代码整段被关掉。CT 钳形值的 UDP 收发函数还在文件里，主循环里的广播调用被注释，所以现在不会按 UDP 去跟 HEMS 通信。钳形电流若要上报，走的是 OCPP DataTransfer 定时器，不是这条 UDP。</p>
+  <p><a href="system.html">下一章：参数、升级，以及和清单不一致的地方</a></p>
+</section>
+</main>
+</body>
+</html>
