@@ -212,9 +212,50 @@
   <p>清单里的 GetLog、LogStatusNotification 标成支持，是因为有本地日志。源码没有这两个报文名。日志是 <code>log_record</code>，按平台要求上传走的是 GetDiagnostics。</p>
 </section>
 <section id="offline">
-  <h2>5.4 断网补传和第二路</h2>
+  <h2>5.4 断网补传</h2>
   <p>未登录时，开始、结束、电量记在本地记录里，不组 OCPP 报文。登录成功后如果记录条数不为 0，置离线交易存在，发送队列优先把这些记录补成 StartTransaction、StopTransaction、MeterValues。本地授权缓存和 SendLocalList 下发的名单在非充电过程中每秒刷新。</p>
-  <p>清单写双平台不支持。源码在 <code>ocpp_admin_mode &gt; 0</code> 时对第二路做同样的握手。第二路只发 Boot、Status、Heartbeat、DataTransfer，以及固件、诊断、安全事件，不发启停交易和 MeterValues。管理地址同样可以是 wss。</p>
+  <p>断网补传只看主连接。管理连接断开时不把进行中的开始、结束、电量写进离线记录。</p>
+</section>
+<section id="dual">
+  <h2>5.5 两路 OCPP 怎么连</h2>
+  <p>源码里有两套独立的 OCPP 会话，编号 0 和 1。<code>ocpp_admin_mode</code> 大于 0 才建第二路。两路走同一块网卡，不是一根有线、一根 4G。接口仍按有线、WiFi、4G 的优先级选一次，两路一起换成这个接口。每路一个 TCP：<code>socketid</code> 分别是 0 和 1。</p>
+  <table>
+    <tr><th></th><th>主连接 0</th><th>管理连接 1</th></tr>
+    <tr><td>地址</td><td><code>serverurl</code></td><td><code>ocpp_admin_url</code></td></tr>
+    <tr><td>基本认证</td><td>用户名都是 <code>chargerID</code>。密码是 <code>ocpp_AuthorizationKey</code></td><td>密码是 <code>ocpp_admin_AuthorizationKey</code>。默认两把钥匙都是 <code>12345678</code></td></tr>
+    <tr><td>路径</td><td colspan="2">从 URL 拆出主机、端口、路径，路径末尾再拼上 <code>chargerID</code>。URL 没写端口时，ws 用 80，wss 用 443。两路各自判断要不要 TLS</td></tr>
+    <tr><td>子协议</td><td colspan="2"><code>ocpp1.6</code>，WebSocket 版本 13</td></tr>
+    <tr><td>UniqueId</td><td colspan="2">各自从 100 起加，互不相干</td></tr>
+  </table>
+  <p>蓝牙或网页把管理地址改成和主地址相同（忽略大小写）时，会把 <code>ocpp_admin_mode</code> 写成 0，第二路不再建。OCPP 的 ChangeConfiguration 改 <code>OCPPAdminMode</code>、<code>OCPPAdminURL</code>、<code>OCPPAdminPWD</code> 时没有限制必须来自哪一路。改地址的结果是 RebootRequired，新地址先放在内存，重启后 <code>net_reconfig</code> 才解析。</p>
+  <h3>TCP 怎么轮流拨</h3>
+  <table>
+    <tr><th>接口</th><th>顺序</th></tr>
+    <tr><td>W5500</td><td>主连接没连上就拨 socket 0。管理开关打开后，socket 1 没连上再拨。两路都连上就各自收发</td></tr>
+    <tr><td>WiFi</td><td>状态 2 拨主连接。成功且管理开关打开进状态 3 拨管理连接，成功后回到状态 1。两路共用这一条 AT 串口，不能同时发 AT</td></tr>
+    <tr><td>4G</td><td>状态 1 跑主连接 TCP。成功且管理开关打开进状态 2 跑管理连接，成功后回到状态 1，两路轮流推进</td></tr>
+  </table>
+  <p>OCPP 任务每 5 ms 先处理主连接，管理开关打开再处理第二路。每路自己的条件是：TCP 已通（wss 还要 TLS 完成），并且重连倒计时为 0，才做 WebSocket 握手。握手成功才进各自的发送调度。发送超时累计 3 次，或这路 TCP 掉了，就拆掉这一路，倒计时设 200，大约 1 秒后允许再握手。主连接在拆掉之前，如果已经握手成功且没有离线记录堆积，会把还在等应答的电量、开始、结束存进离线记录。管理连接拆掉时不做这件事。</p>
+  <h3>第二路主动发什么</h3>
+  <p>两路各有一套标志和 30 秒发送超时。第二路的调度只挑这些：BootNotification、1 号枪的 StatusNotification、Heartbeat、固件状态、诊断状态、安全事件。不挑 Authorize、StartTransaction、StopTransaction、MeterValues，也不补离线交易。0 号连接器的状态只在主连接发。</p>
+  <p>钳形电流定时器在两路都会把 DataTransfer 标志置上。第二路的组包函数一进来就返回，字节不会发出去，发送状态仍被标成等待。30 秒没有应答算一次超时；<code>DataTransfer_type</code> 还大于 0 时会再置标志。连续 3 次超时会把管理连接拆掉。所以打开钳形电流上报时，管理平台既收不到这条 DataTransfer，这路连接还会被超时拖断。</p>
+  <table>
+    <tr><th>Boot 被接受之后</th><th>主连接</th><th>管理连接</th></tr>
+    <tr><td>对时</td><td colspan="2">两路的 <code>currentTime</code> 都会 <code>set_system_time</code>，并 <code>save_datatime</code>。后到的那条会改掉桩上的时间</td></tr>
+    <tr><td>心跳间隔</td><td>平台给的 interval 不小于 20 且参数检查通过，写进 <code>ocpp_HeartbeatInterval</code> 并落盘</td><td>不小于 20 就只改内存里的 <code>ocpp2_HeartbeatInterval</code>，不改主连接那个参数</td></tr>
+    <tr><td>60 分钟复位用的登录时刻</td><td>置 <code>network_first_connected</code></td><td>不置</td></tr>
+    <tr><td>ChangeConfiguration 的 HeartbeatInterval</td><td>改参数并保存</td><td>只改第二路内存间隔</td></tr>
+  </table>
+  <h3>平台从第二路下发时，桩听不听</h3>
+  <p>收包解析不区分哪一路，两路都能进同一套 Call 处理。下面这些会看是不是主连接：</p>
+  <table>
+    <tr><th>平台命令</th><th>从管理连接进来</th></tr>
+    <tr><td>RemoteStartTransaction</td><td>直接 Rejected。还要求模式是 1</td></tr>
+    <tr><td>RemoteStopTransaction</td><td>停不了充。模式 1 或 3 的停止只在主连接上做</td></tr>
+    <tr><td>ReserveNow</td><td>保持 Rejected，不写预约</td></tr>
+    <tr><td>CancelReservation</td><td>Rejected</td></tr>
+    <tr><td>其余</td><td>没有按连接过滤。ChangeAvailability、ChangeConfiguration、Reset、UnlockConnector、UpdateFirmware、SetChargingProfile、SendLocalList、GetConfiguration、TriggerMessage、DataTransfer 从管理平台发来也会执行。Unlock 和 Reset 因此能把正在进行的充电停掉</td></tr>
+  </table>
   <p><a href="network.html">下一章：报文从哪条链路发出去</a></p>
 </section>
 </main>
