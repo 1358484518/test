@@ -14,10 +14,12 @@
   <a href="index.html">目录</a>
   <a href="peripheral.html">1 外设</a>
   <a href="charge.html">2 充电</a>
+  <a href="module.html">3 模块</a>
 </nav>
 <main>
 <section>
   <h2>目录</h2>
+  <p>先读第 2 页，把充电这件事看完。第 3 页才是每个模块自己的条件。</p>
   <div class="toc">
     <a href="peripheral.html"><b>1. 外设</b></a>
     <a class="l2" href="peripheral.html#clock">1.1 时钟：250 MHz，SPI 125 MHz，ADC 62.5 MHz</a>
@@ -29,21 +31,24 @@
     <a class="l2" href="peripheral.html#uart">1.7 串口：调试、WiFi、计量、485、4G、读卡</a>
     <a class="l2" href="peripheral.html#other">1.8 DMA、看门狗、没再使用的脚</a>
 
-    <a href="charge.html"><b>2. 充电任务</b></a>
-    <a class="l2" href="charge.html#overview">2.0 先看整体：三种启动，然后是等待、准备、充电、暂停、结束</a>
-    <a class="l2" href="charge.html#task">2.1 每毫秒先做故障扫描，再跑状态，最后才改 PWM、接触器、灯</a>
-    <a class="l2" href="charge.html#auth">2.2 谁把授权位置 1：刷卡、远程、即插即充、光伏、离线</a>
-    <a class="l2" href="charge.html#state">2.3 八个状态怎么转</a>
-    <a class="l2" href="charge.html#prepare">2.4 准备进充电：6 V、电流 ≥ 6 A、二极管、漏电自检、PE 自检，再保持 600 ms</a>
-    <a class="l2" href="charge.html#charge">2.5 车收到 9 V 只暂停；拔枪或取消授权才结束</a>
-    <a class="l2" href="charge.html#cp">2.6 CP 分档、PP 限流、怎样算插枪</a>
-    <a class="l2" href="charge.html#pwm">2.7 占空比：6～51 A 用 I/0.6，52～63 A 用 I/2.5+64</a>
-    <a class="l2" href="charge.html#relay">2.8 充电接触器要等锁住；PE 接触器上电先自检</a>
-    <a class="l2" href="charge.html#lock">2.9 电子锁只在枪线产品上，枪座直接返回</a>
-    <a class="l2" href="fault.html">2A 故障：返回 1 停机、返回 2 暂停、返回 3 只改灯</a>
-    <a class="l2" href="energy.html">2B 电量：片内积分或外置表覆盖，本段电量是累计值之差</a>
-    <a class="l2" href="limit.html">2C 电流：计划、光伏、家庭负载、DLB、温度，最后小于 6 A 变成 0</a>
-    <a class="l2" href="led.html">2D 灯：故障优先，否则按状态给颜色</a>
+    <a href="charge.html"><b>2. 充电这件事</b></a>
+    <a class="l2" href="charge.html#overview">三种启动，然后是等待、准备、充电、暂停、结束</a>
+    <a class="l2" href="charge.html#modules">每个环节由哪个模块负责</a>
+
+    <a href="module.html"><b>3. 各模块</b></a>
+    <a class="l2" href="module.html#task">状态机：每毫秒决定处在哪个环节</a>
+    <a class="l2" href="module.html#auth">授权：谁把 on_charging 置 1</a>
+    <a class="l2" href="module.html#state">八个状态的控制位和离开条件</a>
+    <a class="l2" href="module.html#prepare">准备：进充电要同时满足的条件</a>
+    <a class="l2" href="module.html#charge">停充：9 V 暂停，拔枪或取消授权才结束</a>
+    <a class="l2" href="module.html#cp">CP：12 V、9 V、6 V 和插枪</a>
+    <a class="l2" href="module.html#pwm">PWM：6～51 A 用 I/0.6，52～63 A 用 I/2.5+64</a>
+    <a class="l2" href="module.html#relay">接触器：吸合、保持、断开</a>
+    <a class="l2" href="module.html#lock">电子锁：枪线上锁，枪座不锁</a>
+    <a class="l2" href="fault.html">故障：返回 1 结束，返回 2 暂停，返回 3 只改灯</a>
+    <a class="l2" href="energy.html">电量：累计 Wh，本段电量是差值</a>
+    <a class="l2" href="limit.html">限流：计划、光伏、家庭负载、DLB、温度</a>
+    <a class="l2" href="led.html">灯：故障优先，否则按环节给颜色</a>
   </div>
 </section>
 </main>

@@ -6,6 +6,7 @@ body { margin:0; font:16px/1.7 "Segoe UI","Microsoft YaHei",sans-serif; color:va
 header { background:#16324f; color:#fff; padding:22px 6vw 16px; }
 header h1 { margin:0; font-size:26px; }
 header p { margin:8px 0 0; color:#d5e2ef; max-width:980px; }
+header a { color:#fff; }
 nav.top { position:sticky; top:0; background:#fff; border-bottom:1px solid var(--line); padding:10px 6vw; display:flex; flex-wrap:wrap; gap:8px 14px; z-index:2; }
 nav.top a { color:#1d4e89; text-decoration:none; font-size:14px; }
 main { padding:18px 6vw 72px; max-width:1040px; }

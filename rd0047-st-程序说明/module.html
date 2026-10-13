@@ -1,0 +1,237 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>3. 充电各模块</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <h1>3. 充电各模块</h1>
+  <p>整条充电在 <a href="charge.html">充电</a> 那一页。这一页只写每个模块自己负责什么、条件是什么。</p>
+</header>
+<nav class="top">
+  <a href="index.html">目录</a>
+  <a href="peripheral.html">1 外设</a>
+  <a href="charge.html">2 充电</a>
+  <a href="module.html">3 模块</a>
+</nav>
+<main>
+<section id="task">
+  <h2>状态机：每毫秒决定现在处在哪个环节</h2>
+  <p>测试模式不进这个任务。正常运行时顺序是：</p>
+  <ol>
+    <li><code>pe_contactor_detect</code>：上电约 2 s 内做 PE 接触器自检，结果给 <code>get_pe_realy_selfCheck_state</code>。</li>
+    <li><code>sysfault_check_proc</code>：上电前 3 s 只累加 <code>fault_waittime</code>，之后才扫电流、温度、电表、接触器、CP、PP、DLB 通信和防拆。</li>
+    <li><code>sysfault_set_ocpp_fault</code>：把故障位写成 OCPP 错误码。</li>
+    <li>按 <code>CHARGE_STATE</code> 进入八个状态函数。</li>
+    <li>刷新 0 号连接器：故障为 Faulted，不可用为 Unavailable，其余为 Available。这和枪上的状态不是同一个变量。</li>
+    <li><code>set_current_proc</code>、<code>set_contactor_proc</code>、<code>set_led_proc</code>。</li>
+  </ol>
+  <p>电子锁不在这 1 ms 末尾。主循环里的调用被注释掉了，实际由 TIM6 大约每 1 ms 调 <code>set_lock_proc</code>。准备态里还会再调一次。</p>
+  <p>电压、PE 电流、漏电、二极管不在这个函数里扫，它们在 TIM6 的 50 µs / 1 ms 节拍里，见 <a href="fault.html">故障</a>。</p>
+</section>
+
+<section id="auth">
+  <h2>授权：谁把 on_charging 置 1 或清 0</h2>
+  <p>状态机不自己决定开始充电。它看 <code>on_charging</code>。这个位为 1，并且已经插枪，等待态才进准备。下面这些地方会改它。</p>
+  <table>
+    <tr><th>来源</th><th>置 1 的条件</th><th>清 0</th></tr>
+    <tr><td>刷卡 <code>Card_Task</code></td><td>等待或结束且当前未授权；或预约中卡号匹配</td><td>同一张卡再刷</td></tr>
+    <tr><td>OCPP 远程启动</td><td>等待、预约、准备或结束，且预约卡号不冲突</td><td>远程停止、解锁、复位</td></tr>
+    <tr><td>蓝牙</td><td>数据为 <code>'1'</code>，且在等待或准备</td><td>数据为 <code>'2'</code>，且在充电、暂停或结束</td></tr>
+    <tr><td>即插即充 <code>user_auto_charge_check</code></td><td><code>chargemode == 3</code> 或安装测试。插枪超过 1 s，或强制键按下。上电 8.5 s 内不判</td><td>充电、暂停、结束里再次满足停止条件</td></tr>
+    <tr><td>光伏 <code>solar_charging_process</code></td><td>光伏模式非 0，可提供电流和 <code>solar_current</code> 都 ≥ 6 A，插枪超过 3 s，未授权，状态是等待或结束</td><td>不在这里清</td></tr>
+    <tr><td>离线自动充 <code>offline_auto_charging</code></td><td>平台已断开，且断开时间超过 <code>ocpp_OfflineChargingTime</code> 分钟。插枪超过 3 s，未授权，状态是等待。<code>OfflineChargingTime == 0</code> 或平台仍连着则直接返回</td><td>不在这里清</td></tr>
+  </table>
+  <p>即插即充、光伏、离线这三处把 <code>idTag</code> 写成 <code>ChargingPointFreeIdTag</code>。</p>
+</section>
+
+<section id="state">
+  <h2>状态：八个状态怎么转</h2>
+  <div class="flowv">
+    <div class="node"><b>等待</b><span>PWM 关，充电接触器关</span></div>
+    <div class="vedge">on_charging 为 1，并且已经插枪。同时要求做漏电自检，二极管标志清 0</div>
+    <div class="node"><b>准备</b><span>PWM 开，充电接触器关</span></div>
+    <div class="vedge">CP 约 6 V，允许电流 ≥ 6 A，二极管已检完，漏电自检成功，PE 自检走完，这些条件保持 600 ms</div>
+    <div class="node"><b>充电</b><span>PWM 开，锁上。允许电流 ≥ 6 A 才吸合充电接触器</span></div>
+    <div class="branch">
+      <div>
+        <div class="vedge">CP 收到约 9 V，枪还插着，授权还在</div>
+        <div class="node"><b>暂停</b><span>PWM 继续发，充电接触器断开</span></div>
+        <div class="vedge">CP 回到约 6 V，允许电流 ≥ 6 A，没有故障，保持 600 ms，回到充电</div>
+      </div>
+      <div>
+        <div class="vedge">拔枪，或授权被清成 0。故障返回 1 也走这里，并且不等电流</div>
+        <div class="node"><b>结束</b><span>PWM 关，充电接触器关。先等 2.5 秒再存电量</span></div>
+        <div class="vedge">拔枪，或已经停过之后授权又置 1，回到等待。枪还插着且授权仍是 0，就停在结束</div>
+      </div>
+    </div>
+  </div>
+  <p>等待态遇到故障返回 1 或 2 进故障，不可用标志进不可用，预约标志进预约。这三支离开后都会回到等待，不经过准备。</p>
+  <table>
+    <tr><th>状态</th><th>控制位</th><th>离开条件</th></tr>
+    <tr><td>等待</td><td>锁、接触器、PWM 都关。PE 接触器不在这里关</td><td>故障返回 1 或 2 进故障。不可用标志进不可用。预约标志进预约。授权且已插枪进准备，并要求漏电自检、<code>diode_check_flag = 0</code>。授权后超过 <code>ocpp_ConnectionTimeOut</code> 秒还没插枪，授权清掉，原因是车断开</td></tr>
+    <tr><td>准备</td><td>PWM 开，接触器关。锁在本函数里再跑一次</td><td>见 <a href="#prepare">2.4</a></td></tr>
+    <tr><td>充电</td><td>PWM 开，锁开，PE 接触器开。<code>pwm_current ≥ 6</code> 才允许充电接触器</td><td>CP 收到约 9 V 进暂停，PWM 不停。拔枪或授权清 0 才进结束。见 <a href="#charge">2.5</a></td></tr>
+    <tr><td>暂停</td><td>PWM 仍开，充电接触器关。锁使能不在这里清</td><td>故障返回 1，或授权撤销，或拔枪，进结束。没有故障、CP 回到 6 V 且 <code>pwm_current ≥ 6</code>，保持 600 ms 后回充电</td></tr>
+    <tr><td>结束</td><td>进入时 PWM 和充电接触器使能已清 0</td><td>先空等 2500 ms 并存电量。枪还插着且授权仍在，就停在这里。拔枪，或停过之后授权又置 1，才回等待</td></tr>
+    <tr><td>故障</td><td>不改 PWM 和接触器，沿用上一态留下的位</td><td><code>SysState_Check_Fault</code> 不再返回 1 或 2 时回等待。<code>fault_stop</code> 在故障期间置 1，离开时不看它</td></tr>
+    <tr><td>预约</td><td>不改输出位</td><td>授权置 1 则清预约标志并回等待。到了 <code>reserve_time</code> 也清预约标志。有故障或预约标志为 0 回等待</td></tr>
+    <tr><td>不可用</td><td>不改输出位</td><td>有故障，或 <code>unavailable_enable</code> 被清 0，回等待</td></tr>
+  </table>
+  <p>等待、准备、暂停里都会 <code>dlb_current_reset</code>：DLB 模式为 1 时把 <code>dlb_current</code> 设成 6 A，否则设成额定电流。充电态不重置，限流才生效。</p>
+</section>
+
+<section id="prepare">
+  <h2>准备：什么条件才允许进充电</h2>
+  <p>下面几条要同时成立，并已经保持 600 ms：</p>
+  <ul>
+    <li>CP 分档是 <code>CP_OnCharge</code>（约 6 V）。</li>
+    <li><code>pwm_current ≥ 6</code>。小于 6 A 时 <code>set_current_proc</code> 会把电流写成 0，CP 变成常高，这一条就不成立。</li>
+    <li><code>diode_check_flag == 2</code>，二极管检测已经做完。若 <code>protection_disable</code> 的 bit0 为 1，准备态直接把标志写成 2，等于跳过。</li>
+    <li><code>rcm_selftest_success == 1</code>。进入准备时把 <code>rcm_selftest_needed</code> 交给 5 ms 任务 <code>rcm_selftest</code>：测试脚拉高，200 ms 后若脱扣脚为高则成功，再过 400 ms 仍没有则失败。</li>
+    <li><code>get_pe_realy_selfCheck_state()</code> 为 1，PE 接触器上电自检走完。</li>
+  </ul>
+  <p>成立后记下开始时间，<code>is_charging = 1</code>，存电量和光伏电量，清远程解锁。CP 不是 6 V，或电流小于 6 A，连续 10 s 则进暂停。故障返回 1、不可用、预约、拔枪或授权撤销，都进结束，并把授权和 PWM 关掉。</p>
+  <p>故障返回 2（过欠压、过温、防拆、电表、二极管、30 s 内的电子锁失败）从准备直接进暂停，不进结束。</p>
+</section>
+
+<section id="charge">
+  <h2>停充：9 V 只暂停，拔枪或取消授权才结束</h2>
+  <div class="flowv">
+    <div class="node"><b>充电中，车自己停止取电</b><span>枪还插着，授权还在</span></div>
+    <div class="vedge">CPVolt 连续约 21 ms 落在 7.9～10.0 V，分档变成 9 V</div>
+    <div class="node"><b>下一拍进入暂停</b><span>这一拍还不改 PWM，也不改接触器</span></div>
+    <div class="vedge">再下一拍，暂停函数执行</div>
+    <div class="node"><b>暂停稳住</b><span>接触器使能清 0，PWM 使能保持 1，占空比照常发</span></div>
+    <div class="vedge">车再把 CP 拉回约 6 V，允许电流 ≥ 6 A，保持 600 ms</div>
+    <div class="node"><b>回到充电</b><span>接触器在允许电流 ≥ 6 A 时重新吸合</span></div>
+  </div>
+  <p>电流变小不会结束这次充电。电流小于 1 A 持续 5 分钟就停的那段在 <code>#if 0</code> 里，现在不编译。</p>
+  <p>车充满或自己停止取电时，枪还插着，CP 从约 6 V 收到约 9 V。桩进的是暂停，不是结束：接触器断开，1 kHz PWM 继续发，<code>on_charging</code> 保持 1。车再把 CP 拉回 6 V，并且允许电流仍不少于 6 A，保持 600 ms，就从暂停回到充电。</p>
+  <p>这次充电要结束，只有拔枪，或者刷卡、远程、蓝牙把 <code>on_charging</code> 清成 0。拔枪时 CP 到约 12 V，停止原因写成 <code>REASON_EVDisconnected</code>。</p>
+
+  <h3>充电函数里先判哪一条</h3>
+  <p><code>charge_charging</code> 每一拍严格按这个顺序，命中就离开，不会再往下走：</p>
+  <ol>
+    <li>故障返回 1：立刻进结束。同一拍把 <code>pwm_enable</code> 和 <code>contactor_enable</code> 都清 0，<code>auth_type</code> 清 0。不等电流。</li>
+    <li>故障返回 2：这一拍只把状态改成暂停就返回，控制位还是充电态留下的。下一拍才由暂停函数把接触器使能清 0，PWM 使能保持 1。</li>
+    <li><code>check_stop_charge_condition</code> 返回 0。拔枪，或 <code>on_charging</code> 已经是 0，都会返回 0。无效卡且 <code>auth_type == 2</code>、本段电量超过 <code>ocpp_MaxEnergyOnInvalidId</code> 时，这个函数自己把授权清 0，原因是 DeAuthorized，于是也返回 0。见下面两支。</li>
+    <li>上面都不成立，且 CP 分档已经是 9 V：计时达到 1 ms 就进暂停并返回。注释里的 500 ms 没有生效。这一拍不改 PWM 和接触器，下一拍暂停函数才把接触器使能清 0。</li>
+    <li>否则留在充电：<code>lock_enable = 1</code>，<code>pwm_enable = 1</code>，<code>pe_contactor_enable = 1</code>。<code>pwm_current ≥ 6</code> 才把 <code>contactor_enable</code> 置 1。每过 1 秒 <code>charge_time</code> 加 1，每 10 秒写一次电量。</li>
+  </ol>
+
+  <h3>仍插枪、CP 收到 9 V</h3>
+  <p>授权还在，枪也还在，所以第 3 步不成立，走到第 4 步。</p>
+  <ol>
+    <li><code>CPVolt</code> 要先连续约 21 ms 落在 7.9～10.0 V，分档才变成 <code>CP_PrepareCharge</code>。分档在 1 ms 的故障扫描里做，电压值本身每 5 ms 更新一次，见 <a href="#cp">2.6</a>。</li>
+    <li>分档变成 9 V 的下一拍，充电函数进暂停。</li>
+    <li>再下一拍，暂停函数执行：<code>pwm_enable = 1</code>，<code>contactor_enable = 0</code>，并 <code>dlb_current_reset</code>。本毫秒末尾 <code>set_current_proc</code> 仍按允许电流发 PWM；<code>set_contactor_proc</code> 看到使能为 0，请求断开线圈。</li>
+    <li>OCPP 状态：允许电流已经是 0 时报 SuspendedEVSE，否则报 SuspendedEV。</li>
+    <li>车回到 6 V、故障返回值是 0、允许电流 ≥ 6 A，并保持 600 ms：暂停函数把状态改回充电。若 <code>is_charging</code> 曾被清掉，这里再置 1 并写交易标志。</li>
+  </ol>
+  <p>电子锁这一段不放开。暂停函数里把 <code>lock_enable</code> 清 0 的那行是注释。</p>
+
+  <h3>拔枪，或人把授权清掉</h3>
+  <p>第 3 步成立时，函数先把 <code>pwm_enable</code> 写成 0，再看要等多久。单相用 <code>l1_current</code>，三相取三相里最大的，单位 0.01 A。最大电流 ≥ 100（1.00 A）则等 6200 ms，否则等 200 ms。</p>
+  <p>等的时候有两支，结果不一样：</p>
+  <ul>
+    <li>CP 分档仍是 6 V：函数在这里 <code>return</code>。前面写上的 <code>pwm_enable = 0</code> 留住了，函数底部那段“把 PWM 和接触器再打开”走不到。接触器使能保持为 1，线圈先不断。时间到了才 <code>goto end</code>，PWM 和接触器使能一起清 0，进入结束。</li>
+    <li>CP 已经不是 6 V，时间却还没到：函数不返回，也不进结束。同一拍继续执行到底部，把 <code>pwm_enable</code> 写回 1；允许电流 ≥ 6 A 时把 <code>contactor_enable</code> 也写回 1。开头那一次 <code>pwm_enable = 0</code> 被盖掉。所以拔枪后、200 ms 或 6200 ms 走完之前，充电函数每毫秒仍在要求发 PWM、允许吸合。时间到了才真正进入结束并关掉这两位。</li>
+  </ul>
+  <p>另外，<code>CP_break_pro</code> 在充电态看到 12 V 或 9 V 连续超过 6 次（每 5 ms 一次，约 35 ms）时，会把 <code>contactor_enable</code> 清 0。状态若已经离开充电，它不再动这个位。9 V 正常暂停大约 22 ms 就离开充电态，通常赶在这 35 ms 之前，接触器是靠暂停函数清掉的，不是靠这里。拔枪后会在充电态里等到 200 ms 或 6.2 s，这 35 ms 的强制断开会先发生一次，但下一毫秒充电函数又可能把使能写回 1。</p>
+
+  <h3>结束态什么时候回等待</h3>
+  <ol>
+    <li>进入后先空等 2500 ms，期间不改状态。等完写一次累计电量和光伏电量。</li>
+    <li>枪还插着并且 <code>on_charging</code> 仍是 1：停在结束，不回等待。</li>
+    <li>拔枪或授权已是 0：<code>lock_enable</code> 清 0。若 <code>is_charging</code> 为 1，清掉并写交易标志。然后 <code>wait_unplug</code> 记成 1。</li>
+    <li><code>wait_unplug</code> 为 1 时，枪已经拔掉，或者授权又被置回 1，同一拍就把 <code>wait_unplug</code> 清掉并回到等待。枪还插着且授权仍是 0，就继续停在结束。</li>
+  </ol>
+  <p>所以人停充但枪不拔，灯停在结束态，直到拔枪。车只是把 CP 收到 9 V、人没有取消授权，则根本不会进结束，一直停在暂停。</p>
+</section>
+
+<section id="cp">
+  <h2>CP：判断插枪，以及 12 V、9 V、6 V</h2>
+  <p>状态机读的是 <code>adc_handle.CPVolt</code>，单位 0.1 V。这个值每 5 ms 由 <code>adc_cp_calc</code> 重写：对 <code>ADC_DCCP_Buf</code> 做平均再加 10。缓冲来自 PA3（引脚名 <code>ADC_version</code>），换算是采样值 × 3.3 / 4096 × 10 × 11 / 3。PC0 的 CP 通道也在填 <code>ADC_CP_Buf</code>，但把它写进 <code>CPVolt</code> 的几行都注释掉了，10 ms 任务只把这块缓冲清掉。</p>
+  <p>分档在 <code>StateSwitch_CP1_Check</code>，上电 3 秒后每 1 ms 看一次当时的 <code>CPVolt</code>。电压要连续落在窗口里才改档。改档和拆接触器不是同一个函数：<code>CP_break_pro</code> 只在那次 5 ms 的 <code>adc_cp_calc</code> 里调用。</p>
+  <table>
+    <tr><th>CPVolt</th><th>约等于</th><th>连续次数</th><th>分档</th></tr>
+    <tr><td>105～130</td><td>10.5～13.0 V</td><td>大于 20</td><td>断开 <code>CP_Disconnect</code>。若当时已在充电，同时置 CP 异常</td></tr>
+    <tr><td>79～100</td><td>7.9～10.0 V</td><td>大于 20</td><td>准备 <code>CP_PrepareCharge</code></td></tr>
+    <tr><td>49～74</td><td>4.9～7.4 V</td><td>大于 10</td><td>充电中 <code>CP_OnCharge</code></td></tr>
+    <tr><td>≥ 131 或 &lt; 49</td><td>窗口外</td><td>大于 100</td><td>未知，并置 CP 异常</td></tr>
+  </table>
+  <p>插枪标志 <code>bChargerConnect</code> 在这里维护：</p>
+  <ul>
+    <li><code>pp_charge_enable == 0</code>（枪座，编译宏 <code>CONNECTOR_TYPE != 0</code>）：CP 不是断开也不是未知就算插枪。</li>
+    <li><code>pp_charge_enable == 1</code>（枪线）：PP 为未插枪则强制未连接；否则仍看 CP 是不是 9 V 或 6 V。充电中若 PP 变成未插枪，额外置 CP 异常。</li>
+  </ul>
+  <p>插枪沿把 <code>pe_contactor_enable</code> 置 1，并记下 <code>ev_connect_tick</code>。拔枪沿清 PE 接触器使能、记下断开时刻、清电子锁失败标志。CP 异常要等拔枪且正常计数超过 5000 次（约 25 s）才清除。</p>
+  <p>PP 只在枪线产品里分档，电压单位 0.1 V：16～22 为 13 A，9～15 为 20 A，2～8 为 32 A，其余为未插枪。63 A 那一档整段被注释掉了。</p>
+  <p><code>CP_break_pro</code> 只用原始 <code>CPVolt</code>，并且必须当时状态还是充电。12 V 窗口（105～130）或 9 V 窗口（79～100）连续超过 6 次，约 35 ms，就把 <code>contactor_enable</code> 清 0、<code>RL_action</code> 清 0，断开延时计数写成 40。状态已经变成暂停或结束之后，这个函数不再改接触器。它和上面的分档计数是两套变量。</p>
+</section>
+
+<section id="pwm">
+  <h2>PWM：把允许电流换成占空比</h2>
+  <p><code>set_current_proc</code> 先算出允许电流 I，单位 A，见 <a href="limit.html">限流</a>。I 小于 6，或 <code>pwm_enable == 0</code>，都不进下面的公式，直接 <code>CP_PWM_SetDuty(1000)</code>。</p>
+  <p><code>CP_PWM_SetCurrent</code> 里，I 先被限制在 6～63。占空比是百分数，不是小数。比较值写入 TIM4 通道 4，周期寄存器是 999，极性为高，所以高电平时间比例等于比较值 / 1000。</p>
+<pre><code>I = 0，或 pwm_enable = 0：
+    比较值 = 1000
+    CP 保持常高，不发 1 kHz 方波
+
+6 ≤ I ≤ 51：
+    占空比(%) = I / 0.6
+    比较值     = I / 0.6 × 10
+
+52 ≤ I ≤ 63：
+    占空比(%) = I / 2.5 + 64
+    比较值     = (I / 2.5 + 64) × 10</code></pre>
+  <p>代入几个电流：</p>
+  <table>
+    <tr><th>I</th><th>用的公式</th><th>占空比</th><th>比较值</th></tr>
+    <tr><td>0 A</td><td>不套公式</td><td>常高</td><td>1000</td></tr>
+    <tr><td>6 A</td><td>6 / 0.6</td><td>10%</td><td>100</td></tr>
+    <tr><td>32 A</td><td>32 / 0.6</td><td>53.333%</td><td>533.33</td></tr>
+    <tr><td>51 A</td><td>51 / 0.6</td><td>85%</td><td>850</td></tr>
+    <tr><td>63 A</td><td>63 / 2.5 + 64</td><td>89.2%</td><td>892</td></tr>
+  </table>
+  <p>比较值按浮点写入，硬件取整数。51 A 是两条公式的分界：51 / 0.6 = 85，再大一安就改用第二条。</p>
+  <p>电流和上次不同才打印。硬件要等本毫秒末尾才更新，状态函数里看到的 <code>pwm_current</code> 是上一拍算出来的。</p>
+</section>
+
+<section id="relay">
+  <h2>接触器：按使能位吸合或断开</h2>
+  <p><code>set_contactor_proc</code> 每 1 ms 决定吸合还是断开，真正拨线圈的是 50 µs 节拍里的 <code>RL_ctrl</code>。TIM6 每 20 ms 把 <code>RL_allow</code> 置 1，<code>RL_ctrl</code> 才在随后几次 50 µs 调用里动作。</p>
+  <h3>充电接触器</h3>
+  <p>吸合条件要同时成立：没有漏电、没有过压、没有欠压，<code>contactor_enable == 1</code>，并且是枪座，或电子锁反馈已经保持 <code>DURATION_TIME + 400</code> ms（500 ms）。然后每 500 ms 把 <code>RL_action</code> 置 1，延时计数清 0。</p>
+  <p>吸合过程里启动线圈和保持线圈都为 1。反馈确认吸合并且这样的窗口累计到 10 次后，启动线圈放开，只留保持。单相看 <code>relay_state</code>，三相要两路反馈都为 1。三相产品每秒还会根据电压改 <code>phases</code>：只有 L1 ≥ 190.0 V 且 L2、L3 都 &lt; 190.0 V 时当成单相，否则三相。单相机型固定 <code>phases = 1</code>。</p>
+  <p>断开条件是上面任一吸合条件失败。漏电、过压、欠压当拍就 <code>RL_action = 0</code>，延时计数写成 40（40 次 <code>RL_ctrl</code>，约 2 ms）。其它原因每 500 ms 请求一次断开。断开时两路线圈都拉低，三相的第二路一起拉低。</p>
+  <h3>PE 接触器</h3>
+  <p><code>pe_contactor_enable</code> 为 1 时，前 1000 ms 启动和保持都吸合，之后只留保持。为 0 时每 500 ms 两路都断开；漏电或 PEN 故障则当拍断开。</p>
+  <p>插枪把使能置 1，拔枪置 0，充电态也置 1。过压、欠压或 PEN 故障，且 PE 自检已经结束时，<code>sysfault_check_proc</code> 会把使能清 0。</p>
+  <p>上电自检在 <code>pe_contactor_detect</code>，大约 2 s：200 ms 时使能吸合，500～1600 ms 数 PE 反馈为高的次数，1890 ms 附近次数不超过 500 就置 PEN 故障和 PE 继电器故障。1900 ms 后若 CP 不是 9 V 就放开使能，并清除“保持 PEN 故障”标志。自检完成前 <code>get_pe_realy_selfCheck_state</code> 为 0，准备态不能进充电。</p>
+</section>
+
+<section id="lock">
+  <h2>电子锁：枪线上锁，枪座不锁</h2>
+  <p><code>pp_charge_enable == 0</code> 时 <code>set_lock_proc</code> 直接返回，枪座不上锁。上电后先空等 3000 次调用（约 3 s）。</p>
+  <p>相电压过低计数 <code>lowvoltage_count &gt; 500</code> 时直接 <code>locker_unlock_100</code>，占空比 100，并在 50 µs 任务里把 4G 电源宏写成关。这和 PD0 实际被配成输入是同一件事，见外设页。</p>
+  <p>否则分两种：</p>
+  <ul>
+    <li><code>ocpp_UnlockConnectorOnEVSideDisconnect == 1</code>：远程解锁，或 <code>lock_enable == 0</code>，就解锁。否则上锁。PP 变成未插枪时清远程解锁。</li>
+    <li>否则：远程解锁则解锁；PP 不是未插枪就上锁；未插枪则解锁，并清远程解锁。</li>
+  </ul>
+  <p>充电态把 <code>lock_enable</code> 置 1，等待态置 0。准备态在函数开头也置 0，所以准备期间若开了“车端断开就解锁”，锁是松开的；进充电后才锁。</p>
+  <table>
+    <tr><th><code>elock_version</code></th><th>上锁脉宽 / 占空比</th><th>解锁脉宽 / 占空比</th></tr>
+    <tr><td>0</td><td>200 ms / 100</td><td>320 ms / 100</td></tr>
+    <tr><td>1</td><td>200 ms / 72</td><td>320 ms / 72</td></tr>
+    <tr><td>其它</td><td>第一次 230 ms / 50，重试仍是 230 ms / 50</td><td>第一次 200 ms / 50，重试 180 ms / 100</td></tr>
+  </table>
+  <p>脉冲结束后 <code>locker_idle</code>，两路 PWM 比较值都是 0。反馈不对就等 2 s 再试。重试次数到 2 置电子锁故障。上锁方向驱动 TIM3 CH1（PB4），解锁驱动 CH2（PB5）。接触器还没断开时不解锁：<code>contactor_state()</code> 为 1 则停在空闲，不发解锁脉冲。</p>
+</section>
+</main>
+</body>
+</html>
