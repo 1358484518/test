@@ -48,6 +48,26 @@
 
 <section id="state">
   <h2>2.3 八个状态怎么转</h2>
+  <div class="flowv">
+    <div class="node"><b>等待</b><span>PWM 关，充电接触器关</span></div>
+    <div class="vedge">on_charging 为 1，并且已经插枪。同时要求做漏电自检，二极管标志清 0</div>
+    <div class="node"><b>准备</b><span>PWM 开，充电接触器关</span></div>
+    <div class="vedge">CP 约 6 V，允许电流 ≥ 6 A，二极管已检完，漏电自检成功，PE 自检走完，这些条件保持 600 ms</div>
+    <div class="node"><b>充电</b><span>PWM 开，锁上。允许电流 ≥ 6 A 才吸合充电接触器</span></div>
+    <div class="branch">
+      <div>
+        <div class="vedge">CP 收到约 9 V，枪还插着，授权还在</div>
+        <div class="node"><b>暂停</b><span>PWM 继续发，充电接触器断开</span></div>
+        <div class="vedge">CP 回到约 6 V，允许电流 ≥ 6 A，没有故障，保持 600 ms，回到充电</div>
+      </div>
+      <div>
+        <div class="vedge">拔枪，或授权被清成 0。故障返回 1 也走这里，并且不等电流</div>
+        <div class="node"><b>结束</b><span>PWM 关，充电接触器关。先等 2.5 秒再存电量</span></div>
+        <div class="vedge">拔枪，或已经停过之后授权又置 1，回到等待。枪还插着且授权仍是 0，就停在结束</div>
+      </div>
+    </div>
+  </div>
+  <p>等待态遇到故障返回 1 或 2 进故障，不可用标志进不可用，预约标志进预约。这三支离开后都会回到等待，不经过准备。</p>
   <table>
     <tr><th>状态</th><th>控制位</th><th>离开条件</th></tr>
     <tr><td>等待</td><td>锁、接触器、PWM 都关。PE 接触器不在这里关</td><td>故障返回 1 或 2 进故障。不可用标志进不可用。预约标志进预约。授权且已插枪进准备，并要求漏电自检、<code>diode_check_flag = 0</code>。授权后超过 <code>ocpp_ConnectionTimeOut</code> 秒还没插枪，授权清掉，原因是车断开</td></tr>
@@ -78,6 +98,15 @@
 
 <section id="charge">
   <h2>2.5 车正常停充时桩做什么</h2>
+  <div class="flowv">
+    <div class="node"><b>充电中，车自己停止取电</b><span>枪还插着，授权还在</span></div>
+    <div class="vedge">CPVolt 连续约 21 ms 落在 7.9～10.0 V，分档变成 9 V</div>
+    <div class="node"><b>下一拍进入暂停</b><span>这一拍还不改 PWM，也不改接触器</span></div>
+    <div class="vedge">再下一拍，暂停函数执行</div>
+    <div class="node"><b>暂停稳住</b><span>接触器使能清 0，PWM 使能保持 1，占空比照常发</span></div>
+    <div class="vedge">车再把 CP 拉回约 6 V，允许电流 ≥ 6 A，保持 600 ms</div>
+    <div class="node"><b>回到充电</b><span>接触器在允许电流 ≥ 6 A 时重新吸合</span></div>
+  </div>
   <p>电流变小不会结束这次充电。电流小于 1 A 持续 5 分钟就停的那段在 <code>#if 0</code> 里，现在不编译。</p>
   <p>车充满或自己停止取电时，枪还插着，CP 从约 6 V 收到约 9 V。桩进的是暂停，不是结束：接触器断开，1 kHz PWM 继续发，<code>on_charging</code> 保持 1。车再把 CP 拉回 6 V，并且允许电流仍不少于 6 A，保持 600 ms，就从暂停回到充电。</p>
   <p>这次充电要结束，只有拔枪，或者刷卡、远程、蓝牙把 <code>on_charging</code> 清成 0。拔枪时 CP 到约 12 V，停止原因写成 <code>REASON_EVDisconnected</code>。</p>
