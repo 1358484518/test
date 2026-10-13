@@ -8,16 +8,25 @@
 <body>
 <header>
   <h1>RD0047-ST 程序说明</h1>
-  <p>写法与 <code>G0-ST-功能说明</code> 相同：按源码写条件和动作，一页一个功能。读完一节就在这里补入口。</p>
+  <p>按源码写条件和动作。芯片 STM32H573VIT6。读完一节就在这里补入口。</p>
 </header>
 <nav class="top">
   <a href="index.html">目录</a>
+  <a href="peripheral.html">1 外设</a>
 </nav>
 <main>
 <section>
   <h2>目录</h2>
-  <p>页面从读程序开始往下写。先从主循环看起，确认节拍和它调用的任务之后，再按功能拆页。</p>
   <div class="toc">
+    <a href="peripheral.html"><b>1. 外设</b></a>
+    <a class="l2" href="peripheral.html#clock">1.1 时钟：250 MHz，SPI 125 MHz，ADC 62.5 MHz</a>
+    <a class="l2" href="peripheral.html#gpio-out">1.2 GPIO 输出：接触器、漏电、复位、片选</a>
+    <a class="l2" href="peripheral.html#gpio-in">1.3 GPIO 输入：拨码、粘连、锁、防拆、中断</a>
+    <a class="l2" href="peripheral.html#tim">1.4 定时器和 PWM：灯珠、电子锁、CP、蜂鸣器、5 µs 节拍</a>
+    <a class="l2" href="peripheral.html#adc">1.5 ADC：13 路扫描，CP、PP、电压电流、温度</a>
+    <a class="l2" href="peripheral.html#spi">1.6 SPI：W25Q 和 W5500</a>
+    <a class="l2" href="peripheral.html#uart">1.7 串口：调试、WiFi、计量、485、4G、读卡</a>
+    <a class="l2" href="peripheral.html#other">1.8 DMA、看门狗、没再使用的脚</a>
   </div>
 </section>
 </main>
