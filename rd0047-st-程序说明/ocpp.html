@@ -227,16 +227,21 @@
   </table>
   <p>队列里的条数达到「一天能记的电量条数再加 48」之后，电量改成一小时写一条。开始和结束仍是各一条。</p>
 
-  <h3>网通了以后</h3>
-  <p>BootNotification 刚被接受时，桩数 Flash 里还没发出去的条数。是 0，就按在线方式发，进准备直接发 StartTransaction。不是 0，就进入补发：先发最早的那条，内容用写下时的时间和电量。类型是开始就发 StartTransaction，类型是电量就发 MeterValues，类型是结束就发 StopTransaction。平台应答后，这条从队列里去掉，再发新的最早一条。队列空了，才恢复「进准备就直接发」。</p>
-  <p>补发还没完，又来一笔新充电，新的开始、电量和结束也写到队列末尾，排在旧记录后面，不插到前面。</p>
-  <p>平台在 StartTransaction 应答里给的事务号单独写在 Flash 里。后面的 StopTransaction 用这个号。开始那条一直没得到应答时，结束报文里的事务号就还是 Flash 里的旧值。</p>
+  <h3>网通了以后怎么发出去</h3>
+  <p>写进 Flash 的当时不发送。运营平台 WebSocket 连上之后，<code>OCPP_Core_Handle</code> 每次先调用 <code>ocpp_check_message_triggle</code> 决定下一条发什么，再调用 <code>ocpp_local_send_call_message</code> 组包。</p>
+  <p>BootNotification 刚被接受时，<code>ocpp_check_message_triggle</code> 调用 <code>transaction_record_number</code>。条数是 0，<code>offline_transaction_exist</code> 清 0，之后进准备就直接把 <code>CurrentSendMsg</code> 设成 StartTransaction。条数不是 0，这个标志置 1，进入补发。</p>
+  <p>补发时同一函数读队列最前面一条的类型，并设置 <code>CurrentSendMsg</code>：类型 1 是 StartTransaction，类型 3 是 MeterValues，类型 2 是 StopTransaction。Boot、状态、心跳、DataTransfer、Authorize、固件、诊断、安全事件这些还占着发送位时，要等它们发完，当前没有在等应答，才轮到这条离线记录。</p>
+  <p>下一拍 <code>ocpp_local_send_call_message</code> 按 <code>CurrentSendMsg</code> 调用对应的 <code>Call_OCPP_*</code>。因为 <code>offline_transaction_exist</code> 是 1，报文里的时间、电量、原因从 <code>transaction_record_get</code> 读出的那条记录来，不用眼前的充电状态。组完 JSON 后 <code>Send_SameCode</code> 发出去，并把 <code>CurrentSendMsg</code> 改成等待应答。</p>
+  <p>平台应答到来，开始、电量、结束三个接收函数看见仍在补发，就调用 <code>transaction_record_dec</code>，读指针加 1，这条算发完。StartTransaction 的应答即使 JSON 解不开，补发中也会丢掉这一条。队列里读到的类型对不上，<code>offline_transaction_exist</code> 清 0，才恢复进准备直接发。</p>
+  <p>补发还没完，又来一笔新充电，新的开始、电量和结束也写到队列末尾，排在旧记录后面。平台在 StartTransaction 应答里给的事务号由 <code>transactionId_store</code> 单独写在 Flash。后面的 StopTransaction 用 <code>transactionId_init</code> 读回的这个号。开始那条一直没得到应答时，结束报文里的事务号就还是 Flash 里的旧值。</p>
 
   <h3>话发出去了，平台没回</h3>
   <p>StartTransaction、MeterValues 或 StopTransaction 已经发出，超时次数到 3，或者网络检查失败。当时还没在补发的话，把这条没收到应答的按同样格式写进 Flash，然后断开。已经在补发时不再写，避免同一条记两次。重连并且 Boot 被接受后，从这条开始按上面的顺序补发。</p>
 
-  <h3>充电中整机断电</h3>
-  <p>开机读到 <code>is_charging</code> 仍是 1，说明上次没走到结束。桩补写一条结束，原因是 PowerLoss，电量用当前累计电量。写完把这个标志清 0。下次 Boot 被接受，这条结束跟别的记录一起按顺序补发。</p>
+  <h3 id="powerloss">充电中整机断电</h3>
+  <p>进入充电时 <code>charge_preparing</code> 把 <code>is_charging</code> 写成 1，并调用 <code>transaction_flag_store</code> 写到外部 Flash。从暂停回到充电时，如果这个标志还是 0，会再写一次。正常走到结束，<code>check_stop_charge_condition</code> 返回 0，就把标志写成 0 再存一次。中途掉电走不到这次清零，Flash 里一直留着 1。</p>
+  <p>下次上电，<code>main</code> 调用 <code>DEV_Init</code>。它先 <code>transaction_energy_init_V2</code> 把累计电量读回来，再 <code>offline_init</code>，里面的 <code>transaction_flag_init</code> 从 Flash 读 <code>is_charging</code>。仍是 1 时，停止原因写成 <code>Reason_PowerLoss</code>，调用 <code>transaction_stop_store(0)</code>。参数 0 表示电量用 <code>charge_data.energy</code>，类型是结束。卡号那一行是注释掉的，所以这条没有 idTag。写完把 <code>is_charging</code> 清 0，再 <code>transaction_flag_store</code>。开机这一步只追加记录，不发送。</p>
+  <p>发送要等运营平台连上。BootNotification 被接受且队列不是空的，<code>offline_transaction_exist</code> 置 1。<code>ocpp_check_message_triggle</code> 读到队头类型是 <code>TR_TYPE_STOP</code>，把 <code>CurrentSendMsg</code> 设成 StopTransaction。队列里如果还有更早的开始或电量，那些先发，这条掉电结束排在后面。状态、心跳这些发送位空出来之后，<code>ocpp_local_send_call_message</code> 调用 <code>Call_OCPP_StopTransaction</code>。它从这条记录取出时间、<code>meterStop</code> 和原因 PowerLoss，事务号用 <code>transactionId_init</code> 读回的旧号，idTag 为空所以报文不带卡号，然后 <code>Send_SameCode</code> 发出去。平台应答后 <code>RecvCall_OCPP_StopTransaction</code> 调用 <code>transaction_record_dec</code>，把这条从队列去掉。</p>
 
   <h3>离线多久之后允许自己开始充</h3>
   <p><code>OfflineChargingTime</code> 不管上面的队列。Boot 没被接受后再过这么多分钟，枪还插着、还没授权、状态是等待，就把 <code>on_charging</code> 置 1，卡号用免费标识，桩可以在没有平台时开始这次充电。配成 0 就是不做这件事。这次充电的开始、电量、结束，仍然按上面的办法记进 Flash。</p>
