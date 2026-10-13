@@ -174,16 +174,29 @@
 
 <section id="pwm">
   <h2>2.7 CP 占空比</h2>
-  <p><code>set_current_proc</code> 先算出允许电流，见 <a href="limit.html">限流</a>。小于 6 A 写成 0。<code>pwm_enable == 0</code> 也写成 0。</p>
-  <ul>
-    <li>电流为 0：<code>CP_PWM_SetDuty(1000)</code>。TIM4 周期是 999，比较值 1000 时输出整段为高，CP 常高，不再是 1 kHz 方波。记下的电流是 0。</li>
-    <li>电流 6～63 A：<code>CP_PWM_SetCurrent</code>。6～51 A 的占空比百分比是 <code>电流 / 0.6</code>，52～63 A 是 <code>电流 / 2.5 + 64</code>。百分比乘 10 写入比较寄存器，所以 10% 对应比较值 100，高电平占周期的 10%。</li>
-  </ul>
-<pre><code>6 A  -&gt; 10.0%  -&gt; 比较值 100
-32 A -&gt; 53.3%  -&gt; 比较值 533
-51 A -&gt; 85.0%  -&gt; 比较值 850
-63 A -&gt; 89.2%  -&gt; 比较值 892
-0 A  -&gt; 常高   -&gt; 比较值 1000</code></pre>
+  <p><code>set_current_proc</code> 先算出允许电流 I，单位 A，见 <a href="limit.html">限流</a>。I 小于 6，或 <code>pwm_enable == 0</code>，都不进下面的公式，直接 <code>CP_PWM_SetDuty(1000)</code>。</p>
+  <p><code>CP_PWM_SetCurrent</code> 里，I 先被限制在 6～63。占空比是百分数，不是小数。比较值写入 TIM4 通道 4，周期寄存器是 999，极性为高，所以高电平时间比例等于比较值 / 1000。</p>
+<pre><code>I = 0，或 pwm_enable = 0：
+    比较值 = 1000
+    CP 保持常高，不发 1 kHz 方波
+
+6 ≤ I ≤ 51：
+    占空比(%) = I / 0.6
+    比较值     = I / 0.6 × 10
+
+52 ≤ I ≤ 63：
+    占空比(%) = I / 2.5 + 64
+    比较值     = (I / 2.5 + 64) × 10</code></pre>
+  <p>代入几个电流：</p>
+  <table>
+    <tr><th>I</th><th>用的公式</th><th>占空比</th><th>比较值</th></tr>
+    <tr><td>0 A</td><td>不套公式</td><td>常高</td><td>1000</td></tr>
+    <tr><td>6 A</td><td>6 / 0.6</td><td>10%</td><td>100</td></tr>
+    <tr><td>32 A</td><td>32 / 0.6</td><td>53.333%</td><td>533.33</td></tr>
+    <tr><td>51 A</td><td>51 / 0.6</td><td>85%</td><td>850</td></tr>
+    <tr><td>63 A</td><td>63 / 2.5 + 64</td><td>89.2%</td><td>892</td></tr>
+  </table>
+  <p>比较值按浮点写入，硬件取整数。51 A 是两条公式的分界：51 / 0.6 = 85，再大一安就改用第二条。</p>
   <p>电流和上次不同才打印。硬件要等本毫秒末尾才更新，状态函数里看到的 <code>pwm_current</code> 是上一拍算出来的。</p>
 </section>
 
