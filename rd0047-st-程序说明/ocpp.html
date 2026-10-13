@@ -26,7 +26,7 @@
   <div class="flowv">
     <div class="node"><b>WebSocket 已连通</b><span>先发 BootNotification。这一条没发出去之前，不排别的</span></div>
     <div class="vedge">平台接受，并可能改心跳间隔。间隔小于 20 秒不采用</div>
-    <div class="node"><b>运营平台在线</b><span>状态变化发 StatusNotification。准备、充电、暂停发 StartTransaction。结束发 StopTransaction。充电和暂停按采样间隔发 MeterValues</span></div>
+    <div class="node"><b>运营平台在线</b><span>状态变化发 StatusNotification。一进准备就发一次 StartTransaction，进充电不再发。结束发 StopTransaction。充电和暂停才发 MeterValues</span></div>
     <div class="vedge">网断了，或发出去的订单没收到应答</div>
     <div class="node"><b>先记在外部 Flash</b><span>开始、电量、结束各写一张纸条，排成队列。充电本身不停</span></div>
     <div class="vedge">重新 Boot 被接受，队列里还有纸条</div>
@@ -55,7 +55,9 @@
   <p>按心跳间隔发，报文体是空的。平台回应当前时间，桩用来对时。</p>
 
   <h3 id="start">StartTransaction</h3>
-  <p>只在运营平台、并且当前没有离线记录要补时，进入准备、充电或暂停且这笔订单还没报过开始，就发。connectorId 固定 1。idTag 是当前授权卡号。meterStart 是 <code>charge_handle.meter_start</code>，单位 Wh。有预约号就带上，带完把本地预约号清 0。时间戳是当前时间，格式 <code>YYYY-MM-DDTHH:MM:SS.mmmZ</code>。发出时把 <code>transactionId</code> 写成 -1，等应答里的正式号。</p>
+  <p>一笔订单只发一次，发在准备，不发在充电。等待里已经授权、并且枪已经插上，<code>CHARGE_STATE</code> 才从等待改成准备。OCPP 看到准备、并且 <code>is_transaction_start</code> 还是 0，就把这个标志写成 1，排上 StartTransaction。之后进入充电，接触器吸合，标志已经是 1，不会再发。充电和暂停也写在判断里，只是兜底：如果准备阶段没记上，第一次看到充电或暂停仍会补发这一次。</p>
+  <p>只插枪、还没授权时，OCPP 状态可以显示 Preparing，但内部状态仍是等待，不发 StartTransaction。只授权、还没插枪，也停在等待，超时后授权被清掉，同样不发。</p>
+  <p>只在运营平台、并且当前没有离线记录要补时才真正发出。connectorId 固定 1。idTag 是当前授权卡号。meterStart 是 <code>charge_handle.meter_start</code>，单位 Wh。有预约号就带上，带完把本地预约号清 0。时间戳是当前时间，格式 <code>YYYY-MM-DDTHH:MM:SS.mmmZ</code>。发出时把 <code>transactionId</code> 写成 -1，等应答里的正式号。</p>
   <p>离线补传时，连接器、卡号、起点电量、预约号和时间都改从本地开始记录里取。</p>
   <p>应答如果正在补传，桩记下平台给的事务号，丢掉这一条本地记录，不再看授权结果。正常订单里，模式 1 会把应答里的 idTagInfo 写入授权缓存。授权是 Accepted，或者充电模式不是 1，这笔继续，<code>invalid_ID</code> 清 0。模式是 1 且不是 Accepted，把 <code>on_charging</code> 清 0，停止原因 DeAuthorized。代码里还有 <code>auth_type</code> 为 1 或 2 的分支，当前工程没有给它赋 1 或 2 的地方。光伏模式是 1 时，这条应答之后再排一条 DataTransfer，内容是光伏开始。</p>
 
@@ -215,7 +217,7 @@
   <h2>断网时订单怎么补</h2>
   <p>离线只影响运营平台的订单。充电还在本地走，接触器、PWM 不因为 OCPP 断了就停。断的是「开始、电量、结束」这三句话先不发给平台，改写成外部 Flash 里的纸条，连上以后按先后补发。</p>
   <div class="flowv">
-    <div class="node"><b>正常在线</b><span>准备、充电、暂停直接发 StartTransaction。结束发 StopTransaction。充电和暂停按间隔发 MeterValues</span></div>
+    <div class="node"><b>正常在线</b><span>一进准备就发一次 StartTransaction。结束发 StopTransaction。充电和暂停按间隔发 MeterValues</span></div>
     <div class="vedge">WebSocket 没握上手，或者发出去的那条超时、网断了还没收到应答</div>
     <div class="node"><b>写进队列</b><span>一张纸条只记一件事：开始、一次电量，或结束。新的写在队尾</span></div>
     <div class="vedge">再次连上，并且 BootNotification 被接受，队列不是空的</div>
@@ -223,7 +225,7 @@
   </div>
 
   <h3>什么时候改成写纸条</h3>
-  <p>WebSocket 还没握手成功时，<code>OCPP_Task</code> 不跑在线收发，改跑 <code>ocpp_offline_store</code>。进入准备、充电或暂停，并且这笔还没记过开始，写一张开始纸条，卡号用当时的 <code>idTag</code>，电量起点用 <code>meter_start</code>，有预约号就带上并清掉本地预约号。进入结束，写一张结束纸条，电量用 <code>meter_stop</code>，原因用当时的 <code>stop_reason</code>。充电或暂停中按采样间隔再写电量纸条。队列里的条数还没到「一天的采样次数再加 48」时，间隔就是 <code>MeterValueSampleInterval</code>。到了这个数量，电量纸条改成一小时一张，避免 Flash 被写满。</p>
+  <p>WebSocket 还没握手成功时，<code>OCPP_Task</code> 不跑在线收发，改跑 <code>ocpp_offline_store</code>。和在线一样，一进准备就写一张开始纸条，充电阶段不再写第二张。卡号用当时的 <code>idTag</code>，电量起点用 <code>meter_start</code>，有预约号就带上并清掉本地预约号。进入结束，写一张结束纸条，电量用 <code>meter_stop</code>，原因用当时的 <code>stop_reason</code>。充电或暂停中按采样间隔再写电量纸条。队列里的条数还没到「一天的采样次数再加 48」时，间隔就是 <code>MeterValueSampleInterval</code>。到了这个数量，电量纸条改成一小时一张，避免 Flash 被写满。</p>
   <p>还有一种是话已经说出去了。StartTransaction、StopTransaction 或 MeterValues 已经发出，<code>SendDataTimeOutCount</code> 到 3，或者 <code>net_check</code> 失败，并且当时还没有在补传。桩把这条没收到应答的报文按同样的格式补记一张纸条，然后断开，准备重连。已经在补传时不再额外记，避免同一条记两次。</p>
 
   <h3>纸条上有什么</h3>
