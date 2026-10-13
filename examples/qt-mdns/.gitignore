@@ -1,0 +1,10 @@
+/build/
+/qt-mdns
+Makefile
+.qmake.stash
+*.pro.user
+CMakeLists.txt.user
+moc_*
+qrc_*
+ui_*
+object_script.*

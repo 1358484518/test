@@ -1,0 +1,5 @@
+9de38dfbd1cb989b977ed80c512187f0775abbbd
+Merge pull request #48 from ryandrake08/master
+2025-09-06 09:34:19 -0700
+https://github.com/nitroshare/qmdnsengine
+MIT License, Copyright (c) 2018 Nathan Osman
