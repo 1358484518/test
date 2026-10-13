@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>RD0047-ST 读码报告</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <h1>RD0047-ST 读码报告</h1>
+  <p>按 how-to-read-code 的顺序写：先定目的，再横向看架构和数据结构，然后只纵向追一条主线。结论都是 <b>[static]</b>，固件没有在板上跑过，路径来自读源码。</p>
+</header>
+<nav class="top">
+  <a href="index.html">目录</a>
+  <a href="report.html">读码</a>
+  <a href="peripheral.html">1 外设</a>
+  <a href="charge.html">2 充电</a>
+  <a href="module.html">3 模块</a>
+</nav>
+<main>
+<section id="scope">
+  <h2>1. 范围和目的</h2>
+  <ul>
+    <li><b>目的：</b>搞清一次充电怎么开始、怎么输出、怎么停，以及故障会把桩带到哪。</li>
+    <li><b>环境：</b>只读 <code>RD0047-ST</code> 源码。没有编译、没有断点。全部标 <b>[static]</b>。</li>
+    <li><b>主线：</b>从授权到等待、准备、充电、暂停、结束。</li>
+    <li><b>不在这次展开：</b>OCPP 报文内容、TLS、W5500 协议栈、WiFi 的 AT 命令、读卡器帧格式。它们只记录会改哪一个对外接口。</li>
+  </ul>
+</section>
+
+<section id="arch">
+  <h2>2. 横向：谁对谁负责</h2>
+  <p><b>[static]</b> 主循环在 <code>main.c</code>。充电业务不直接碰引脚。状态机只改控制位，输出函数在同一毫秒的末尾才把位变成 PWM、线圈和灯。</p>
+  <div class="flowv">
+    <div class="node"><b>授权</b><span>即插即充、刷卡、OCPP 远程启动。只改 on_charging 和 idTag</span></div>
+    <div class="vedge">1 ms</div>
+    <div class="node"><b>状态机 Charging_task</b><span>看授权、CP 分档、故障返回值，决定环节</span></div>
+    <div class="vedge">同一毫秒的末尾</div>
+    <div class="branch3">
+      <div class="node"><b>PWM</b><span>允许电流变成占空比</span></div>
+      <div class="node"><b>接触器 / 锁</b><span>按使能位吸合或断开</span></div>
+      <div class="node"><b>灯</b><span>按故障码或环节上色</span></div>
+    </div>
+  </div>
+  <p>采样和故障不在这条 1 ms 调用里算完。TIM6 用 50 µs 和大约 1 ms 的节拍去扫 CP、漏电、电压。电量在 5 ms 的计量任务和 100 ms 的外置表任务里更新。限流（光伏、家庭负载、DLB、充电计划）在 100 ms 和 500 ms 里改电流上限，状态机下一毫秒才用来发 PWM。</p>
+  <p>外设引脚在 <a href="peripheral.html">外设</a>。一次充电的环节说明在 <a href="charge.html">充电</a>。每个函数的条件在 <a href="module.html">模块</a>。</p>
+</section>
+
+<section id="data">
+  <h2>3. 核心数据</h2>
+  <p><b>[static]</b> 一次充电能不能进行，看这几个对象，不看某一条报文。</p>
+  <table>
+    <tr><th>对象</th><th>谁改</th><th>作用</th></tr>
+    <tr><td><code>charge_handle.on_charging</code></td><td>刷卡、即插即充、远程启动、蓝牙</td><td>授权位。为 1 且已经插枪，等待才进准备</td></tr>
+    <tr><td><code>charge_handle.curstate</code></td><td>只由状态函数改</td><td>等待、准备、充电、暂停、结束、故障、预约、不可用</td></tr>
+    <tr><td><code>ctrol_param</code> 里的 pwm / contactor / lock / pe</td><td>状态函数置位，输出函数消费</td><td>这一拍允不允许发波、吸合、上锁</td></tr>
+    <tr><td><code>bChargerConnect</code> 和 <code>charge_param.CP</code></td><td><code>StateSwitch_CP1_Check</code></td><td>插没插枪，以及 12 V / 9 V / 6 V</td></tr>
+    <tr><td><code>pwm_current</code></td><td><code>set_current_proc</code></td><td>裁完的电流。小于 6 A 变成 0，CP 常高</td></tr>
+    <tr><td><code>charge_data.energy</code></td><td>计量芯片积分，或外置表覆盖</td><td>累计 Wh。本段电量是它减去等待态记下的起点</td></tr>
+    <tr><td><code>sysfault_message</code></td><td>各检测函数</td><td><code>SysState_Check_Fault</code> 把它收成返回值 0、1、2、3</td></tr>
+  </table>
+</section>
+
+<section id="vertical">
+  <h2>4. 纵向：一次正常充电</h2>
+  <p><b>[static]</b> 下面是主线。三种启动方式只影响第一格，从等待开始后面相同。</p>
+  <div class="flowv">
+    <div class="branch3">
+      <div class="node"><b>即插即充</b><span>模式 3。插枪超过 1 秒</span></div>
+      <div class="node"><b>刷卡</b><span>模式 2 本地卡。模式 1 还问平台或本地名单</span></div>
+      <div class="node"><b>服务器</b><span>只有模式 1 接受远程启动</span></div>
+    </div>
+    <div class="vedge">on_charging = 1</div>
+    <div class="node"><b>等待</b><span>没插枪就停在这里。PWM 关，接触器开路</span></div>
+    <div class="vedge">已插枪</div>
+    <div class="node"><b>准备</b><span>发 PWM，接触器仍断开。做二极管和漏电自检</span></div>
+    <div class="vedge">CP 约 6 V，电流 ≥ 6 A，两项自检和 PE 自检都完成，保持 600 ms</div>
+    <div class="node"><b>充电</b><span>电流 ≥ 6 A 才吸合接触器。枪线上锁。每 10 秒存电量</span></div>
+    <div class="branch">
+      <div>
+        <div class="vedge">车把 CP 收到约 9 V</div>
+        <div class="node"><b>暂停</b><span>接触器断开，PWM 还在。回到 6 V 可再充</span></div>
+      </div>
+      <div>
+        <div class="vedge">拔枪，或授权被清 0。返回 1 的故障也走这里</div>
+        <div class="node"><b>结束</b><span>PWM 关。等 2.5 秒存电量。拔枪后回等待</span></div>
+      </div>
+    </div>
+  </div>
+  <p>车自己停充不会结束订单。电流变小也不结束，那段 5 分钟逻辑在 <code>#if 0</code> 里。<b>[static]</b></p>
+  <p>故障返回 1（漏电、过流、接地、接触器、CP 异常等）从准备或充电直接结束，不等电流。返回 2（过欠压、过温、防拆、电表、二极管）只进暂停，PWM 还在。返回 3 只有 DLB 通信失败，状态不动，灯变紫。等待态里返回 1 和 2 都先进入故障态。<b>[static]</b></p>
+  <p>占空比、接触器时序、CP 窗口这些纵向细节在 <a href="module.html">模块</a>。</p>
+</section>
+
+<section id="black">
+  <h2>5. 黑盒：这次没拆开</h2>
+  <table>
+    <tr><th>接口</th><th>对主线的作用</th><th>为什么先不拆</th></tr>
+    <tr><td>OCPP 报文组包</td><td>远程启动把 <code>on_charging</code> 置 1，远程停止清 0。模式不是 1 时远程启动被拒绝</td><td>主线只关心授权位，不关心 JSON 字段</td></tr>
+    <tr><td>WiFi / 4G / W5500</td><td>决定平台在不在线，从而决定刷卡走 Authorize 还是本地名单</td><td>连上之后对充电输出没有第二条路径</td></tr>
+    <tr><td>读卡器帧</td><td>给出卡 UID。模式 2 用绑定卡启动，模式 3 刷卡分支是空的</td><td>卡号怎么从串口解出来，不改变后面的状态机</td></tr>
+    <tr><td>计量芯片寄存器表</td><td>没有外置表时，功率积分进 <code>charge_data.energy</code></td><td>电量页已经写了积分式，寄存器位定义留到以后</td></tr>
+  </table>
+</section>
+
+<section id="notes">
+  <h2>6. 读的时候要注意的几处</h2>
+  <ul>
+    <li><b>[static]</b> 停充等待期间，如果 CP 已经不是 6 V，<code>charge_charging</code> 不会停在“先关 PWM”那一支，同一拍后部会把 <code>pwm_enable</code> 写回 1。只有 CP 仍是 6 V 时，PWM 才会在等待电流下降期间保持关闭。</li>
+    <li><b>[static]</b> 状态机用的 <code>CPVolt</code> 来自 PA3 上 <code>ADC_DCCP_Buf</code> 的平均再加 10。PC0 的 CP 采样缓冲有写入，但写进 <code>CPVolt</code> 的代码被注释掉了。</li>
+    <li><b>[static]</b> 名字叫 4G 电源的 PD0，初始化是上拉输入。<code>POWER_4G_ON</code> 仍对它做写操作。</li>
+    <li><b>[static]</b> 看门狗初始化整段在 <code>#if 0</code> 里。</li>
+  </ul>
+</section>
+
+<section id="next">
+  <h2>7. 往后可以拆的</h2>
+  <ul>
+    <li>OCPP 每一条报文实际填什么、断网补传。</li>
+    <li>计量芯片每个寄存器和校准系数。</li>
+    <li>把上面标 <b>[static]</b> 的路径在板上对一次 CP 电压和接触器动作。</li>
+  </ul>
+</section>
+</main>
+</body>
+</html>
