@@ -29,14 +29,15 @@
   <p>充电计划有效时得到 <code>sc_maxcurrent</code>。太阳能没开，输出起点就是这个计划电流。太阳能也开着，起点是计划电流和 <code>solar_current</code> 里较大的那个。然后再被 <code>dlm_current</code>、额定电流、枪线 PP、温度降档收小，小于 6 A 写成 0，记进 <code>demand_current</code>。最后再和 <code>dlb_current</code> 取小，仍小于 6 A 就写成 0，这才是 <code>pwm_current</code>。</p>
 
   <h3 id="priority">谁先算、谁最后封顶</h3>
+  <p>实现在 <code>Charging_Task.c</code> 的 <code>set_current_proc</code>。局部变量 <code>current</code> 一开始等于额定电流。<code>pwm_enable</code> 为 0 时直接写成 0，跳到后面记 <code>demand_current</code>，中间的计划和太阳能都不看。</p>
   <p>DLB 是最后一道上限，前面算出再大也不能超过 <code>dlb_current</code>。充电计划并不排在太阳能上面，太阳能也不是最低的那一道。顺序是：</p>
   <ol>
-    <li>先定起点。计划和太阳能都有效，取 <code>sc_maxcurrent</code> 和 <code>solar_current</code> 里较大的那个。只有计划，起点就是计划电流。只有太阳能，起点就是 <code>solar_current</code>。两个都没有，起点是额定电流。</li>
-    <li>然后只能往下收：家庭负载 <code>dlm_current</code>、额定电流、枪线 PP、温度降档。这一步谁小用谁。</li>
-    <li>小于 6 A 写成 0，记成 <code>demand_current</code>。</li>
-    <li>最后再和 <code>dlb_current</code> 取小。还是小于 6 A，再写成 0，这才送给 PWM。</li>
+    <li><code>sc_profile_valid</code> 为真且 <code>solar_mode</code> 不是 0：<code>current = MAX(sc_maxcurrent, solar_current)</code>。计划有效但太阳能是 0：<code>current = sc_maxcurrent</code>。计划无效但太阳能不是 0：<code>current = solar_current</code>。两个都不生效：保持函数开头的额定电流。</li>
+    <li>然后四次都是「比它大就收成它」：<code>dlm_current</code>、额定电流、枪线产品的 PP、温度降档。温度降档只在 <code>down_power_charge</code> 有效时做，按机内温度收成 16、20、24、28 或 32 A。</li>
+    <li>小于 6 A 写成 0，然后 <code>demand_current = current</code>。DLB 在这次赋值之后才比较。</li>
+    <li><code>current &gt; dlb_current</code> 时收成 <code>dlb_current</code>。还是小于 6 A，再写成 0。结果和原来的 <code>pwm_current</code> 不同才更新。大于 0 调用 <code>CP_PWM_SetCurrent</code>，等于 0 调用 <code>CP_PWM_SetDuty(1000)</code>，CP 保持高电平。</li>
   </ol>
-  <p>计划限 10 A、太阳能想充 16 A 时，起点是 16 A。计划不会把剩电砍成 10 A。家庭负载、额定电流和 DLB 仍可以把 16 A 压下去。DLB 只给 6 A，最终就是 6 A。</p>
+  <p>计划限 10 A、太阳能想充 16 A，并且计划有效、太阳能模式不是 0，第一步 <code>MAX</code> 得到 16。计划不会把 16 砍成 10。若后面的家庭负载和额定电流都不少于 16，而 <code>dlb_current</code> 是 6，第四步把 16 收成 6。6 不小于 6，不会再写成 0，PWM 按 6 A 发波。DLB 给的是 5 A 或更小，第二次小于 6 A 的判断会写成 0，CP 改成常高。</p>
 
   <h3>solar_current_from_grid</h3>
   <p>这是存在参数里的配置，单位是安培，不是电表或逆变器测出来的。出厂默认 0。允许的值是 0，或者 6 A 到桩的额定电流。小于 6 A 又不是 0，检查不通过。</p>
