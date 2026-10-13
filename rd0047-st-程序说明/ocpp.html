@@ -27,8 +27,10 @@
     <div class="node"><b>WebSocket 已连通</b><span>先发 BootNotification。这一条没发出去之前，不排别的</span></div>
     <div class="vedge">平台接受，并可能改心跳间隔。间隔小于 20 秒不采用</div>
     <div class="node"><b>运营平台在线</b><span>状态变化发 StatusNotification。准备、充电、暂停发 StartTransaction。结束发 StopTransaction。充电和暂停按采样间隔发 MeterValues</span></div>
-    <div class="vedge">Boot 还没被接受，本地有未上传记录</div>
-    <div class="node"><b>离线补传</b><span>开始、结束、电量先记在本地。重新 Boot 成功且本地还有记录时，按记录类型逐条补发，这期间不发新的订单</span></div>
+    <div class="vedge">网断了，或发出去的订单没收到应答</div>
+    <div class="node"><b>先记在外部 Flash</b><span>开始、电量、结束各写一张纸条，排成队列。充电本身不停</span></div>
+    <div class="vedge">重新 Boot 被接受，队列里还有纸条</div>
+    <div class="node"><b>按队列补发</b><span>先发最旧的一张。平台回了才发下一张。队列空了才发眼前这笔新订单</span></div>
   </div>
   <p>运营平台空闲时的发送顺序是：Boot、0 号连接器状态、1 号连接器状态、心跳、DataTransfer、Authorize、固件状态、签名固件状态、诊断状态、安全事件。这些都没有时，如果正在补传离线记录，就按记录里的类型发开始、结束或电量。没有离线记录才发当前的 StartTransaction、StopTransaction、MeterValues。管理平台没有 0 号连接器状态，也没有 Authorize、订单和签名固件状态。</p>
   <p>安装测试模式里，MeterValues 的发送标志仍会被置上，真正发出前被丢掉，平台收不到这条。触发报文的应答仍然可以是 Accepted。</p>
@@ -211,8 +213,38 @@
 
 <section id="offline">
   <h2>断网时订单怎么补</h2>
-  <p>运营平台 Boot 是否被接受，会在空闲时拿来和上一次比较。刚变成已接受时，本地交易记录条数为 0 就把补传标志清掉，否则置 1。补传标志为 1 时，准备、充电、暂停不再发 StartTransaction，而是 <code>transaction_start_store</code>。结束时 <code>transaction_stop_store</code>。充电和暂停按采样间隔 <code>transaction_info_store</code>，不发上网。</p>
-  <p>补传按队列头部的类型发。开始记录发 StartTransaction，结束记录发 StopTransaction，过程记录发 MeterValues。应答到来就丢掉头部一条。类型对不上就把补传标志清掉，恢复发当前订单。补传期间，新的开始、结束、电量不会插到前面。</p>
+  <p>离线只影响运营平台的订单。充电还在本地走，接触器、PWM 不因为 OCPP 断了就停。断的是「开始、电量、结束」这三句话先不发给平台，改写成外部 Flash 里的纸条，连上以后按先后补发。</p>
+  <div class="flowv">
+    <div class="node"><b>正常在线</b><span>准备、充电、暂停直接发 StartTransaction。结束发 StopTransaction。充电和暂停按间隔发 MeterValues</span></div>
+    <div class="vedge">WebSocket 没握上手，或者发出去的那条超时、网断了还没收到应答</div>
+    <div class="node"><b>写进队列</b><span>一张纸条只记一件事：开始、一次电量，或结束。新的写在队尾</span></div>
+    <div class="vedge">再次连上，并且 BootNotification 被接受，队列不是空的</div>
+    <div class="node"><b>补发</b><span>只发队头那一张。平台回了，队头丢掉，再发新的队头。发完才回到上面的在线发法</span></div>
+  </div>
+
+  <h3>什么时候改成写纸条</h3>
+  <p>WebSocket 还没握手成功时，<code>OCPP_Task</code> 不跑在线收发，改跑 <code>ocpp_offline_store</code>。进入准备、充电或暂停，并且这笔还没记过开始，写一张开始纸条，卡号用当时的 <code>idTag</code>，电量起点用 <code>meter_start</code>，有预约号就带上并清掉本地预约号。进入结束，写一张结束纸条，电量用 <code>meter_stop</code>，原因用当时的 <code>stop_reason</code>。充电或暂停中按采样间隔再写电量纸条。队列里的条数还没到「一天的采样次数再加 48」时，间隔就是 <code>MeterValueSampleInterval</code>。到了这个数量，电量纸条改成一小时一张，避免 Flash 被写满。</p>
+  <p>还有一种是话已经说出去了。StartTransaction、StopTransaction 或 MeterValues 已经发出，<code>SendDataTimeOutCount</code> 到 3，或者 <code>net_check</code> 失败，并且当时还没有在补传。桩把这条没收到应答的报文按同样的格式补记一张纸条，然后断开，准备重连。已经在补传时不再额外记，避免同一条记两次。</p>
+
+  <h3>纸条上有什么</h3>
+  <table>
+    <tr><th>类型</th><th>以后补发成</th><th>记下的内容</th></tr>
+    <tr><td>开始，类型 1</td><td>StartTransaction</td><td>时间、连接器、卡号、起点电量、预约号</td></tr>
+    <tr><td>结束，类型 2</td><td>StopTransaction</td><td>时间、结束电量、停止原因。卡号这张不写</td></tr>
+    <tr><td>电量，类型 3</td><td>MeterValues</td><td>时间、累计电量、功率除以 10、承诺电流、各相电压电流。三相才记 L2、L3</td></tr>
+  </table>
+  <p>队列是外部 Flash 上的环形缓冲。写指针往后放新纸条，读指针指向还没发出去的最旧一张。条数是写指针减读指针，绕回去时加上队列长度。读到魔术字不对的空位会跳过。</p>
+
+  <h3>连上之后怎么发</h3>
+  <p>BootNotification 从没被接受到被接受的这一下，桩数一下队列。是 0，补传标志清掉，按在线方式发。不是 0，<code>offline_transaction_exist</code> 置 1。置上之后，当前这笔新订单也不直接发，同样写到队尾，排在旧纸条后面。</p>
+  <p>发送时先看队头类型。类型 1 发 StartTransaction，类型 2 发 StopTransaction，类型 3 发 MeterValues，字段从这张纸条里取，不从眼前的充电状态取。平台应答到来，读指针加 1，这张就算发完。StartTransaction 的应答即使 JSON 解不开，补传中也会把这张丢掉。队头类型对不上，补传标志清 0，恢复发眼前的订单。</p>
+  <p>事务号另存在 Flash 的一块里。在线 StartTransaction 的应答把平台给的号写进去。补发开始交易的应答也会写。这样断电之后，结束交易还能带上同一个号。</p>
+
+  <h3>充电中突然断电</h3>
+  <p>开机时 <code>transaction_flag_init</code> 读到 <code>is_charging</code> 仍是 1，说明上次充电没正常结束。它补写一张结束纸条，原因是 PowerLoss，电量用当前累计电量 <code>charge_data.energy</code>，不是 <code>meter_stop</code>。写完把充电标志清 0。下次 Boot 被接受，这张结束会跟别的纸条一起补发。</p>
+
+  <h3>这和离线还能充不是一回事</h3>
+  <p><code>OfflineChargingTime</code> 不管订单队列。它是 Boot 没被接受之后，再过这么多分钟，如果枪还插着、人还没授权、状态是等待，就把 <code>on_charging</code> 置 1，卡号用免费标识，让桩在没有平台的时候也能开始充。这个时间配成 0 表示不启用。订单该记纸条还是记纸条。</p>
 </section>
 </main>
 </body>
