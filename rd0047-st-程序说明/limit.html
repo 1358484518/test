@@ -8,7 +8,7 @@
 <body>
 <header>
   <h1>2C. 电流限制</h1>
-  <p>智能充电不另开一种充电模式。桩已经允许充电之后，用充电计划、光伏、家庭负载把允许多少安改小。小于 6 A 就不发方波，接触器也不合。DLB 和温度降功率也限制电流，但它们不在智能充电这个文件里，叠在最后。</p>
+  <p>太阳能决定有多少绿电可以充。家庭负载和 DLB 决定线路允许多少。充电计划决定服务器允许多少。计划和太阳能同时有效时取较大的那个，再被家庭负载、额定电流、枪线、温度和 DLB 收小。小于 6 A 就不发方波。</p>
 </header>
 <nav class="top">
   <a href="index.html">目录</a>
@@ -21,6 +21,23 @@
   <a href="ocpp.html">OCPP</a>
 </nav>
 <main>
+<section id="together">
+  <h2>太阳能、家庭负载、DLB、充电计划</h2>
+  <p>太阳能模式打开后，桩不再按额定电流一直充。它用家里剩余的光伏功率算出 <code>solar_current</code>。<code>solar_current_from_grid</code> 为 0 时，只有余电够才充。设成 6 A 到额定电流时，没有余电也至少按这个电流从电网补，有余电就在这个电流上再加余电对应的电流。可提供电流和当前 <code>solar_current</code> 都已经到 6 A、枪插上超过 3 秒、还没授权、状态是等待或结束时，桩自己把 <code>on_charging</code> 置 1，卡号用免费标识。算到最后低于 6 A，CP 保持高电平，不再给充电方波。</p>
+  <p>家庭动态负载 <code>power_distribution_enable</code> 看的是入户总电流。允许电流减去 2 A，再减去家里其他电器正在用的电流，得到 <code>dlm_current</code>。它不区分电来自光伏还是电网，只避免整户超过总开关。太阳能想充的电流比这个大，就降到 <code>dlm_current</code>。家里还空、但光伏没有余电，并且 <code>solar_current_from_grid</code> 是 0 时，桩不会因为家里有空额就从电网加电流。代码不检查“开太阳能之前必须先开动态负载”。两路都用进户电流钳，钳不准时余电和家里剩余额度一起不准。</p>
+  <p>DLB 是多台桩共用一路电时，主机用 RS485 给这台桩的 <code>dlb_current</code>。它在裁剪的最后生效，比它大的电流会被裁掉。裁完不到 6 A，PWM 电流写成 0。</p>
+  <p>充电计划有效时得到 <code>sc_maxcurrent</code>。太阳能没开，输出起点就是这个计划电流。太阳能也开着，起点是计划电流和 <code>solar_current</code> 里较大的那个。然后再被 <code>dlm_current</code>、额定电流、枪线 PP、温度降档收小，小于 6 A 写成 0，记进 <code>demand_current</code>。最后再和 <code>dlb_current</code> 取小，仍小于 6 A 就写成 0，这才是 <code>pwm_current</code>。</p>
+
+  <h3>solar_current_from_grid</h3>
+  <p>这是存在参数里的配置，单位是安培，不是电表或逆变器测出来的。出厂默认 0。允许的值是 0，或者 6 A 到桩的额定电流。小于 6 A 又不是 0，检查不通过。</p>
+  <p>三个入口改完会写入参数：OCPP 键 <code>SolarCurrentFromGrid</code>，网页项 <code>solarcurrent</code>，蓝牙太阳能设置里的 <code>current</code>。蓝牙先打保存标志，断开时 <code>APP_Save_Config</code> 才写 Flash。调试串口命令 <code>solar_current_from_grid</code> 只改内存，那个分支没有调用参数保存。</p>
+
+  <h3 id="excess">剩余光伏从哪来</h3>
+  <p><code>hsdlb.excess_solar_power</code> 是光伏发出来、家里还没用完的功率。它不是逆变器直接读出来的，由 Clamps（<code>sampling_methord</code>）决定来源。</p>
+  <p>小于 4 时，桩用自己板上的进户钳，在 <code>ADC_Handle.c</code> 里算。每一相用充电电流减去进户钳电流，得到这一相的光伏电流。三相加起来再乘 L1 电压，除以 1000，得到剩余功率。进户钳测的是电网方向：往外送电时减出来的就是还没被家里用掉的光伏。板上还有一路 <code>SolarCurr</code>，这条剩余功率不用它。</p>
+  <p>等于 4 时不自己测，收外接 HEMS 的 UDP。JSON 里的 <code>solar_power</code> 原样写进 <code>excess_solar_power</code>。超过 120 秒没收到包，这个值清成 0，太阳能侧就认为没有余电。</p>
+  <p>Clamps 合法值是 0 到 4。钳卡在电表进户线上，变量名是 <code>GridHomeCurr</code>。光伏侧要另卡一只钳在逆变器输出上，这套计算没有这样做。</p>
+</section>
 <section id="smart">
   <h2>智能充电里有什么</h2>
   <p>代码在 <code>Smart_Charge_Handle.c</code>。它只改电流上限，不改授权以外的充电状态。光伏在电流够用时会自己把授权打开，那是这一组里唯一会启动充电的。</p>
