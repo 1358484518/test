@@ -66,8 +66,34 @@
 </section>
 
 <section id="bt">
-  <h2>蓝牙在处理什么</h2>
-  <p>手机先发连接命令，桩才接受后面的命令。还没通过密码时，只放行连接、退出、密码、读设备信息和读充电状态。密码通过之后才能改配置和控制充电。</p>
+  <h2>蓝牙怎么和 App 配对、认证</h2>
+  <p>这里有两层，不要混在一起。第一层是手机和 ESP32 的蓝牙连接，没有配对码。第二层是 App 和桩之间的协议认证：先交换会话密钥，再对密码。密码通过之前，改参数和控制充电的命令会被拒绝。</p>
+  <div class="flowv">
+    <div class="node"><b>模组广播</b><span>名字是桩号 chargerID。手机在系统里能搜到这台桩</span></div>
+    <div class="vedge">手机发起连接。模组回 +BLECONN，bt_connected 置 1。这一步还不认 App</div>
+    <div class="node"><b>App 发连接命令 0x21</b><span>帧头是 A5 A5。带上时间、客户码、8 字节随机数、加密方式</span></div>
+    <div class="vedge">桩用序列号算出客户码和密钥，和 App 的随机数做 SHA1，得到会话密钥。回自己的随机数和密钥摘要</div>
+    <div class="node"><b>协议已接通</b><span>proto_accept = 1。还不能改配置</span></div>
+    <div class="vedge">App 发密码命令。8 字节</div>
+    <div class="node"><b>密码通过</b><span>password_accept = 1。之后的命令按约定方式加密</span></div>
+  </div>
+  <h3>广播和连接</h3>
+  <p><code>esp32_ble_init</code> 把 ESP32 设成 BLE 从机：<code>AT+BLEINIT=2</code>，名字 <code>AT+BLENAME</code> 用 <code>sys_param.chargerID</code>，再建 GATT 服务并开始广播。广播内容里也带着这个名字。手机连上后，串口收到 <code>+BLECONN:</code> 且后面是逗号，<code>bt_connected</code> 置 1。收到 <code>+BLEDISCONN:0</code> 则清 0。链路断开不会清掉下面的协议认证标志，那两个标志只在退出命令里清。</p>
+  <h3>连接命令在交换什么</h3>
+  <p>第一帧必须以 <code>A5 A5</code> 开头，类型必须是交流桩类型，末尾必须是 <code>0x88</code>，校验和要对。还没发过连接命令时，别的命令回 <code>0xE2</code>。</p>
+  <p>连接命令里的加密方式：<code>'0'</code> 不加密，<code>'1'</code> 掩码，<code>'2'</code> AES。桩用 <code>gen_key(序列号)</code> 得到 2 字节客户码和 32 字节密钥。客户码在序列号格式合法时取序列号第 5、第 6 个字符，否则是 <code>00</code>。桩把 App 的客户码、这把密钥、App 的 8 字节随机数做 SHA1，再自己生成 8 字节随机数做另一份 SHA1，把协议版本 7、加密方式和自己的随机数、摘要回给 App。连接命令本身不加密。回完之后，会话密钥改成：客户码、密钥、双方随机数再做一次 SHA1 的前 16 字节。后面的命令按选定方式用这把密钥加解密。</p>
+  <p>两路 OCPP 都还没 Boot 成功时，连接命令里的时间如果像合法日期，会拿来改桩的时钟。</p>
+  <h3>密码</h3>
+  <p>密码是 8 个字符，存在 <code>sec_param.bt_password</code>。出厂写成 <code>12345678</code>。网页和蓝牙改密码都会改这个字段。比对有两把钥匙，先对用户密码，不对再算超级密码：</p>
+  <ul>
+    <li>和 <code>sec_param.bt_password</code> 前 8 字节相同，通过。</li>
+    <li>否则用序列号和这次报文里的 8 字节随机数 <code>gen_pwd</code> 算出超级密码。和它相同也通过。这把钥匙不存在参数里，每次随随机数变。</li>
+    <li>都不对，<code>password_accept</code> 保持 0，应答里的结果是 <code>'0'</code>。通过则应答 <code>'1'</code>。</li>
+  </ul>
+  <p>密码还没通过时，只允许连接、退出、密码、读设备信息、读序列号、读充电状态。改 WiFi、改服务器、启停充电、升级这些都会被拒绝。</p>
+  <h3>退出</h3>
+  <p>退出命令把 <code>proto_accept</code> 和 <code>password_accept</code> 都清 0。这次会话里如果改过参数，退出时写 Flash 并置重启标志。蓝牙链路如果只是断开、没有发退出，协议标志还留着，下一次连上后桩仍认为上次的认证有效，直到收到退出或重新走连接命令。</p>
+  <h3>认证通过之后能做什么</h3>
   <table>
     <tr><th>一类命令</th><th>用来做什么</th></tr>
     <tr><td>0x21 起</td><td>连接、退出、密码、改密码、读设备信息</td></tr>
