@@ -18,6 +18,7 @@
   <a href="module.html">3 模块</a>
   <a href="net.html">网络</a>
   <a href="card.html">刷卡</a>
+  <a href="ocpp.html">OCPP</a>
 </nav>
 <main>
 <section>
@@ -66,6 +67,15 @@
     <a class="l2" href="card.html#flow">寻卡、读 UID、再按模式决定启停</a>
     <a class="l2" href="card.html#kinds">绑定卡、桩卡、充电点卡、管理卡</a>
     <a class="l2" href="card.html#mode">模式 1 问平台，模式 2 只认本地卡，模式 3 不启动</a>
+
+    <a href="ocpp.html"><b>OCPP</b></a>
+    <a class="l2" href="ocpp.html#when">先握手，再 Boot，接受之后才走订单</a>
+    <a class="l2" href="ocpp.html#boot">桩发出：Boot、Authorize、状态、心跳、开始、电量、结束</a>
+    <a class="l2" href="ocpp.html#dt">桩发出：DataTransfer、诊断、固件、安全事件</a>
+    <a class="l2" href="ocpp.html#remotestart">平台下发：远程启停、解锁、预约、可用、复位</a>
+    <a class="l2" href="ocpp.html#getconf">平台下发：配置、本地名单、充电计划</a>
+    <a class="l2" href="ocpp.html#trigger">平台下发：触发、诊断、升级、DataTransfer</a>
+    <a class="l2" href="ocpp.html#offline">断网后订单先存本地，连上再补发</a>
 
     <a href="net.html"><b>网络</b></a>
     <a class="l2" href="net.html#links">有线、WiFi、蓝牙、4G：谁上网，谁只配网</a>

@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>OCPP</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <h1>OCPP</h1>
+  <p>桩用 OCPP 1.6 的 JSON 报文跟平台说话，外面套一层 WebSocket。可以同时有两路：<code>OCPP_NET</code> 是运营平台，订单、刷卡授权、充电计划都走这一路。<code>OCPP2_NET</code> 是管理平台，只在管理平台打开时才连，只报状态、心跳、固件和诊断，不发开始交易、结束交易和电量。同一路同一时刻只发一条，等平台回了再发下一条。WebSocket 握完手先发 BootNotification。</p>
+</header>
+<nav class="top">
+  <a href="index.html">目录</a>
+  <a href="report.html">读码</a>
+  <a href="peripheral.html">1 外设</a>
+  <a href="charge.html">2 充电</a>
+  <a href="module.html">3 模块</a>
+  <a href="net.html">网络</a>
+  <a href="card.html">刷卡</a>
+  <a href="ocpp.html">OCPP</a>
+</nav>
+<main>
+<section id="when">
+  <h2>什么时候发哪一类</h2>
+  <div class="flowv">
+    <div class="node"><b>WebSocket 已连通</b><span>先发 BootNotification。这一条没发出去之前，不排别的</span></div>
+    <div class="vedge">平台接受，并可能改心跳间隔。间隔小于 20 秒不采用</div>
+    <div class="node"><b>运营平台在线</b><span>状态变化发 StatusNotification。准备、充电、暂停发 StartTransaction。结束发 StopTransaction。充电和暂停按采样间隔发 MeterValues</span></div>
+    <div class="vedge">Boot 还没被接受，本地有未上传记录</div>
+    <div class="node"><b>离线补传</b><span>开始、结束、电量先记在本地。重新 Boot 成功且本地还有记录时，按记录类型逐条补发，这期间不发新的订单</span></div>
+  </div>
+  <p>运营平台空闲时的发送顺序是：Boot、0 号连接器状态、1 号连接器状态、心跳、DataTransfer、Authorize、固件状态、签名固件状态、诊断状态、安全事件。这些都没有时，如果正在补传离线记录，就按记录里的类型发开始、结束或电量。没有离线记录才发当前的 StartTransaction、StopTransaction、MeterValues。管理平台没有 0 号连接器状态，也没有 Authorize、订单和签名固件状态。</p>
+  <p>安装测试模式里，MeterValues 的发送标志仍会被置上，真正发出前被丢掉，平台收不到这条。触发报文的应答仍然可以是 Accepted。</p>
+</section>
+
+<section id="call">
+  <h2>桩主动发的每一条</h2>
+
+  <h3 id="boot">BootNotification</h3>
+  <p>告诉平台这台桩是谁。WebSocket 一连通就发。填厂商 <code>charge_point_vendor</code>、型号 <code>charge_point_model</code>、桩号 <code>chargerID</code> 放在 chargePointSerialNumber、序列号 <code>sn</code> 放在 chargeBoxSerialNumber、固件版本 <code>ApplicationVersion</code>。当前这条连接走 4G 时再带 ICCID 和 IMSI。</p>
+  <p>平台接受后，这一路记下已注册，用平台给的时间对时并保存。心跳间隔不小于 20 秒、并且通过间隔检查，才改本地值。运营平台改的是 <code>sys_param.ocpp_HeartbeatInterval</code>，管理平台只改内存里的 <code>ocpp2_HeartbeatInterval</code>。同时把 StatusNotification 标志置 1，网络状态写成已登录。运营平台还会记下首次连上的时刻。不接受就按平台给的间隔再试，已注册标志清 0。间隔为 0 时不改重试时间。</p>
+
+  <h3 id="authorize">Authorize</h3>
+  <p>只在运营平台发。里面只有 <code>idTag</code>，就是当前 <code>charge_handle.idTag</code>。平台回 Accepted，桩把 <code>on_charging</code> 置 1。其它结果把授权清 0，停止原因是 DeAuthorized。结果同时写进授权缓存。</p>
+
+  <h3 id="status">StatusNotification</h3>
+  <p>枪状态或故障码变了就发。0 号连接器只用 <code>chargestate0</code>，报整桩是否可用、故障或不可用，这一条只有运营平台发。1 号连接器报等待、准备、充电、暂停、结束、预约。心跳间隔配成 0 或大于 3600 秒时，1 号枪状态还会每小时再报一次。管理平台用运营平台的心跳间隔做这个判断。</p>
+  <p>没有故障时 errorCode 是 NoError。接触器拒动或粘连是 PowerSwitchFailure，info 分别写 Contactor Fault 和 Contactor Welded。过压、欠压的 info 是三相电压原值，中间用空格分开。过流是 OverCurrentFailure。接地失败是 GroundFailure，info 写 L-N 和 L-PE。过温是 HighTemperature。电表超时是 PowerMeterFailure：MID 和 DLM 计数都大于 20 写两个都坏，否则写坏的那一个。其余用 OtherError，并带上厂商名。vendorErrorCode 按故障位写成 RCM selftest failed、RCD leakage、PE leakage、CP abnormal、Emergency stop、TamperDetectionActivated。对不上的写 Unknown，info 里带故障号。</p>
+  <p>平台回了这条之后，桩把这一路的 Boot 已接受标志再写一次 1，网络状态写成已登录。应答内容本身不再往下处理。</p>
+
+  <h3 id="heartbeat">Heartbeat</h3>
+  <p>按心跳间隔发，报文体是空的。平台回应当前时间，桩用来对时。</p>
+
+  <h3 id="start">StartTransaction</h3>
+  <p>只在运营平台、并且当前没有离线记录要补时，进入准备、充电或暂停且这笔订单还没报过开始，就发。connectorId 固定 1。idTag 是当前授权卡号。meterStart 是 <code>charge_handle.meter_start</code>，单位 Wh。有预约号就带上，带完把本地预约号清 0。时间戳是当前时间，格式 <code>YYYY-MM-DDTHH:MM:SS.mmmZ</code>。发出时把 <code>transactionId</code> 写成 -1，等应答里的正式号。</p>
+  <p>离线补传时，连接器、卡号、起点电量、预约号和时间都改从本地开始记录里取。</p>
+  <p>应答如果正在补传，桩记下平台给的事务号，丢掉这一条本地记录，不再看授权结果。正常订单里，模式 1 会把应答里的 idTagInfo 写入授权缓存。授权是 Accepted，或者充电模式不是 1，这笔继续，<code>invalid_ID</code> 清 0。模式是 1 且不是 Accepted，把 <code>on_charging</code> 清 0，停止原因 DeAuthorized。代码里还有 <code>auth_type</code> 为 1 或 2 的分支，当前工程没有给它赋 1 或 2 的地方。光伏模式是 1 时，这条应答之后再排一条 DataTransfer，内容是光伏开始。</p>
+
+  <h3 id="stop">StopTransaction</h3>
+  <p>运营平台且 Boot 已接受时，进入结束态就发。transactionId 是平台之前给的号。meterStop 是 <code>charge_handle.meter_stop</code>。reason 来自 <code>stop_reason</code>，并且带上这个字段。离线补传改用记录里的电量、原因和时间；卡号非空才带 idTag。软复位或硬复位如果在等这条发完，发出后把对应标志清掉，复位才能继续。</p>
+  <p>补传中的应答只丢掉这一条本地记录。正常应答里，模式 1 且带了 idTagInfo，就更新授权缓存。光伏模式是 1 时，再排一条 DataTransfer，内容是光伏停止。</p>
+
+  <h3 id="meter">MeterValues</h3>
+  <p>充电或暂停中，采样间隔大于 0 就发。进入这个状态的第一次立刻发，然后按间隔重复。暂停里计数加 1，离开暂停再清 0。connectorId 是 1。准备、充电、暂停时带 transactionId。采哪些量由 <code>MeterValuesSampledData</code> 的开关决定。除了承诺电流的 context 是 Other，其余是 Sample.Periodic。</p>
+  <table>
+    <tr><th>量</th><th>单位</th><th>在线时怎么填</th></tr>
+    <tr><td>Energy.Active.Import.Register</td><td>Wh</td><td><code>charge_data.energy</code></td></tr>
+    <tr><td>Power.Active.Import</td><td>W</td><td><code>charge_data.power / 10</code></td></tr>
+    <tr><td>Current.Offered</td><td>A</td><td><code>pwm_current</code>，整数，context 是 Other</td></tr>
+    <tr><td>Current.Import</td><td>A</td><td>相电流除以 100，保留两位小数。编译成三相机型才带 L2、L3</td></tr>
+    <tr><td>Voltage</td><td>V</td><td>相电压除以 10，保留一位小数。三相机型才带 L2、L3</td></tr>
+    <tr><td>Temperature</td><td>摄氏度</td><td>机内温度，location 是 Body。读数 4095 不发</td></tr>
+    <tr><td>GridCurrent</td><td>A</td><td>入户电流除以 100，保留一位。L1 一定带，<code>phases</code> 为 3 再带 L2、L3</td></tr>
+  </table>
+  <p>离线补传不带温度和入户电流。功率用记录里的原值，不再除以 10。电流和电压是否带 L2、L3，看当时的 <code>phases</code> 是不是 3，不看编译机型。应答如果正在补传，丢掉这一条记录。光伏模式是 1 时，正常应答之后再排一条光伏电量 DataTransfer。</p>
+
+  <h3 id="dt">DataTransfer（桩发给平台）</h3>
+  <p>发送函数一进来就看连接。管理平台直接返回，这条发不出去。运营平台的 vendorId 用厂商标识。messageId 由 <code>DataTransfer_type</code> 决定：</p>
+  <ul>
+    <li>1，<code>DEBUG_EVENT</code>：data 是调试事件字符串，发完类型清 0。</li>
+    <li>2，<code>GetCTClampValue</code>：单相 data 是 current 和 voltage。三相是 L1 到 L3 的 Current 和 Voltage。电流是采样值乘 10，电压是 0.1 V 的数再乘 100。<code>ocpp_GetCTClampValue</code> 等于 2 时，这条发完把类型改成 3，平台一应答就再发下一条光伏钳位。其它值发完类型清 0。</li>
+    <li>3，<code>GetSolarClampValue</code>：光伏电流乘 10，L1 电压乘 100。</li>
+    <li>4，先看三个标志。开始标志发 <code>SolarIndicator</code>，solar 字段是 started。电量标志发 <code>SolarMeterValue</code>。停止标志再发 <code>SolarIndicator</code>，solar 字段是 stopped。三个标志都清掉之后类型才清 0。</li>
+  </ul>
+  <p>SolarIndicator 带 connectorId 1、transactionId、solarEnergy 和时间。SolarMeterValue 带光伏电量 Wh、光伏功率 W、光伏允许电流 A，以及各相光伏电流。三相这串 JSON 在 L1、L2、L3 三条采样之间没有逗号。</p>
+
+  <h3 id="diagstatus">DiagnosticsStatusNotification</h3>
+  <p>日志上传过程中发。status 就是 <code>log_upload_ctx.state</code>。两路平台的发送标志都会被置上。应答只清超时计数。</p>
+
+  <h3 id="fwstatus">FirmwareStatusNotification</h3>
+  <p>主控升级过程中发。status 取 <code>fw_update_ctx.state</code>。平台应答时，如果当前状态是 Downloaded，桩把它改成 Installing，并再排一条固件状态。</p>
+
+  <h3 id="signedfw">SignedFirmwareStatusNotification</h3>
+  <p>只排在运营平台。status 同样来自升级状态。结构里写了 <code>firmware_requestId</code>，但 <code>requestId_exist</code> 被写成 0，报文里不带这个号。应答时如果状态是 Downloaded，改成 Installing 再发一条。</p>
+
+  <h3 id="security">SecurityEventNotification</h3>
+  <p>安全事件。type 按事件号填：1 是 TamperDetectionActivated，2 是 InvalidFirmwareSigningCertificate，3 是 InvalidFirmwareSignature。其它号写成一个空格。时间戳到秒，没有毫秒。两路都会发。</p>
+</section>
+
+<section id="central">
+  <h2>平台下发的每一条</h2>
+  <p>JSON 解不开时回 CallError，错误码按当时的 <code>OCPP_ErrCode</code>。下面是格式正确之后桩怎么处理。不认识的 Call 走 CallError，错误码 NotImplemented。</p>
+
+  <h3 id="remotestart">RemoteStartTransaction</h3>
+  <p>默认拒绝。只有充电模式是 1，并且来自运营平台，才继续看。已经在充电且卡号不同，拒绝。没带连接器号就当成 1，连接器不是 0 或 1 拒绝。状态必须是等待、预约、准备或结束。预约中卡号不同，拒绝。带了充电计划时，用途必须是 TxProfile，并且本地 TxProfile 条数还没到上限。通过后这条计划写进 <code>tx_profile</code> 的第 0 条，条数改成 1，原来的 TxProfile 被盖掉。然后把 idTag 抄到 <code>charge_handle</code>，<code>on_charging</code> 置 1，蜂鸣一声，回 Accepted。</p>
+
+  <h3 id="remotestop">RemoteStopTransaction</h3>
+  <p>默认拒绝。模式 1 且来自运营平台：还在充电，并且事务号等于当前 <code>transactionId</code>，才接受。模式 3 且来自运营平台：只要还在充电就接受，不看事务号。接受后蜂鸣一声，授权清 0，原因 Remote，<code>full_stop</code> 清 0。模式 2 和管理平台都拒绝。</p>
+
+  <h3 id="unlock">UnlockConnector</h3>
+  <p>连接器是 0 或 1，并且 <code>pp_charge_enable</code> 为 1，也就是枪线产品，才接受。置远程解锁，蜂鸣一声，授权清 0，原因 UnlockCommand，<code>full_stop</code> 清 0，状态回 Unlocked。枪座回 NotSupported。</p>
+
+  <h3 id="reserve">ReserveNow</h3>
+  <p>只处理运营平台，其它连接保持 Rejected。已经有预约则 Occupied。不是等待则 Rejected。不可用则 Unavailable。后面还有一条故障回 Faulted，但它排在「不是等待就拒绝」之后，等待态不会是故障，所以 Faulted 走不到。等待中、模式不是 2、还没授权、到期时间格式正确、连接器是 0 或 1，才接受：记下 idTag、预约号和到期时间，<code>reserved_enable</code> 置 1。同一条预约号在已经是预约态时也能再写，但前面的 Occupied 会先拦住已有预约，所以这条更新路径同样走不到。</p>
+
+  <h3 id="cancelres">CancelReservation</h3>
+  <p>只在运营平台、当前是预约、并且预约号相同才接受，清掉预约标志和预约号。否则拒绝。</p>
+
+  <h3 id="availability">ChangeAvailability</h3>
+  <p>连接器 0 或 1：Inoperative 把 <code>unavailable_enable</code> 置 1，<code>ocpp_availability</code> 写成 0。Operative 反过来。然后立刻 <code>sys_param_set</code>。正在充电、暂停或结束时回 Scheduled，其它情况回 Accepted。连接器号超出 0 和 1 则拒绝，参数不改。</p>
+
+  <h3 id="reset">Reset</h3>
+  <p>硬复位和软复位都接受。类型不是这两种则拒绝。正在充电时先把授权清 0，停止原因分别是 Reboot 和 SoftReset，并置正常复位标志，好让 StopTransaction 先发出去。两种复位都会置延时重启。接受之后，如果之前改过运营平台地址、管理平台地址或上网接口，这时才写入参数。运营地址和管理地址相同，或者运营地址命中白名单，会把管理平台模式关掉，否则打开。白名单看地址里有没有 bgchprod、sync.energy、bgchtest、syncev。</p>
+
+  <h3 id="getconf">GetConfiguration</h3>
+  <p>不带键名时，回固定的一组，注释写明 <code>configurationKey</code> 最多 27 项。这一组里只读的有：AuthorizeRemoteTxRequests 固定 False，GetConfigurationMaxKeys，StopTransactionOnEVSideDisconnect 固定 true，StopTransactionOnInvalidId，SupportedFeatureProfiles，本地名单长度，发送名单长度，充电计划堆叠上限、时段上限、已安装计划上限，OEM_RSSI。可读可写的有心跳、连接超时、本地离线授权、采样量、采样间隔、入户电流间隔、拔枪解锁、本地名单开关、额定电流、充电模式、钳位上报、过压门限、上网接口、管理平台开关、DLB 模式、家庭电流上限。充电模式在这里只回 1 或 2：<code>chargemode</code> 不是 1 就回 2，模式 3 读出来也是 2。SupportedFeatureProfiles 的值是 Core、FirmwareManagement、LocalAuthListManagement、Reservation、SmartCharging、RemoteTrigger。</p>
+  <p>带了键名就按名字逐个回。一次最多 <code>GetConfigurationMaxKeys</code> 个，多出来的被截掉。不认识的名字放进 unknownKey。点名才能问到、空请求里没有的，包括 WebSocket 心跳、钳位间隔、CT 广播间隔、允许的计划单位 Current 和 Power、枪数、文件传输协议 HTTP、对齐采样三项空字符串、ResetRetries 固定 3、交易重发次数 3、重发间隔 15 秒、时钟对齐间隔 0、本地预授权、授权缓存、未知卡离线交易、无效卡电量上限、相序、灯光、桩号、欠压门限、时区、温度上限、光伏三项、即插即充指示、防拆、家庭负载开关和采样方式、电表地址、WiFi、4G、DHCP、静态地址、平台地址和密钥、管理平台地址和密码、累计电量、读卡供电、板载灯。</p>
+
+  <h3 id="changeconf">ChangeConfiguration</h3>
+  <p>先把结果设成 Rejected。键名不在下表里，改成 NotSupported。值通过检查才 Accepted，并且多数会 <code>sys_param_set</code>。ServerURL 和 OCPPAdminURL 回 RebootRequired，先只放在内存，等下一次 Reset 被接受才写进参数。CommunicationNetwork 也是先记下，Reset 接受时才写入上网接口。</p>
+  <table>
+    <tr><th>键</th><th>桩做什么</th></tr>
+    <tr><td>HeartbeatInterval</td><td>运营平台写入参数并改心跳定时。管理平台只改自己的内存间隔，不保存</td></tr>
+    <tr><td>WebSocketPingInterval</td><td>两路 WebSocket 心跳一起改</td></tr>
+    <tr><td>MeterValueSampleInterval</td><td>改电量采样间隔，两路定时一起改</td></tr>
+    <tr><td>GridCurrentInterval</td><td>改入户电流上报间隔。大于 0 才启动定时</td></tr>
+    <tr><td>GetCTClampValue</td><td>0 停掉钳位定时。其它合法值按钳位间隔启动定时</td></tr>
+    <tr><td>GetCTClampInterval</td><td>改钳位间隔。钳位功能是 0 时定时仍停着</td></tr>
+    <tr><td>CTValueBroadcastInterval</td><td>改电流互感器广播间隔</td></tr>
+    <tr><td>ConnectionTimeOut</td><td>还要在 1 到 600 秒之间才接受</td></tr>
+    <tr><td>MeterValuesSampledData</td><td>采样项字符串解析失败回 NotSupported</td></tr>
+    <tr><td>LocalAuthorizeOffline、LocalPreAuthorize、AuthorizationCacheEnabled、LocalAuthListEnabled、AllowOfflineTxForUnknownId</td><td>true 写成 1，其它字符串写成 0</td></tr>
+    <tr><td>MaxEnergyOnInvalidId</td><td>先 Accepted。数值和原来不同并且检查通过才保存</td></tr>
+    <tr><td>UnlockConnectorOnEVSideDisconnect</td><td>true 为 1，其它为 0</td></tr>
+    <tr><td>LightIntensity</td><td>写入灯光并立刻改亮度</td></tr>
+    <tr><td>ChargerID</td><td>桩号变了就清掉离线记录</td></tr>
+    <tr><td>ServerURL</td><td>回 RebootRequired。去掉反斜杠后放进内存，桩号式的变化会清离线记录。Reset 接受时才落盘</td></tr>
+    <tr><td>AuthorizationKey</td><td>写入安全参数并单独保存，不走普通参数保存</td></tr>
+    <tr><td>MaxCurrent</td><td>要在 6 到机型额定上限之间</td></tr>
+    <tr><td>UpperLimitProtectionVoltage、LowerLimitProtectionVoltage</td><td>超出范围回 Rejected</td></tr>
+    <tr><td>ChargerMode</td><td>平台写 2 时，桩先改成 3 再检查。所以写 2 存进去的是模式 3</td></tr>
+    <tr><td>TimeZone</td><td>数值先乘 60 再当分钟偏移。变了就对时区</td></tr>
+    <tr><td>MaxTemperature、SolarMode、SolarCurrentFromGrid、SolarStableTime、DLBMode</td><td>检查通过就写入对应参数</td></tr>
+    <tr><td>PNCIndicator</td><td>只接受 0 或 1</td></tr>
+    <tr><td>TamperEnalbe</td><td>防拆开关。键名就是这个拼写</td></tr>
+    <tr><td>ExternalLimitPowerEnable</td><td>家庭负载分配开关</td></tr>
+    <tr><td>ExternalSamplingCurWring</td><td>采样方式，只接受 0 到 4</td></tr>
+    <tr><td>ExternalLimitPower</td><td>家庭电流上限</td></tr>
+    <tr><td>PowerMeterAddr</td><td>外接电表地址</td></tr>
+    <tr><td>CommunicationNetwork</td><td>先记在内存，Reset 接受时写入上网接口</td></tr>
+    <tr><td>WifiSSID、WifiPassword、4GAPN、4GUserName、4GPassword</td><td>写入对应字符串</td></tr>
+    <tr><td>NetworkMode</td><td>写入 DHCP 开关。这个分支没有置保存标志，改完不会调用参数保存</td></tr>
+    <tr><td>ChargerNetIP、ChargerNetGateway、ChargerNetMask、ChargerNetDNS</td><td>静态地址四项</td></tr>
+    <tr><td>OfflineChargingTime</td><td>离线允许充电时间</td></tr>
+    <tr><td>RFIDPower、MotherboardLED</td><td>写入字段，但没有置保存标志，不会调用参数保存</td></tr>
+    <tr><td>OCPPAdminMode</td><td>只接受 0 或 1</td></tr>
+    <tr><td>OCPPAdminURL</td><td>回 RebootRequired，Reset 接受时才落盘，并按地址是否相同决定要不要开管理平台</td></tr>
+    <tr><td>OCPPAdminPWD</td><td>写入管理平台密钥并单独保存</td></tr>
+    <tr><td>EnergyActiveImport</td><td>值不是 0 时，直接覆盖累计电量并保存，不走平时的跳变检查</td></tr>
+  </table>
+
+  <h3 id="clearcache">ClearCache</h3>
+  <p>格式正确就接受，调用 <code>auth_cache_clear</code> 把授权缓存清掉。</p>
+
+  <h3 id="locallistver">GetLocalListVersion</h3>
+  <p>格式正确就回 <code>local_list_version()</code>。</p>
+
+  <h3 id="sendlist">SendLocalList</h3>
+  <p>先设成 Failed。版本号小于 1，或者差分更新的版本不比本地新，回 VersionMismatch。名单条数超过 <code>SendLocalListMaxLength</code> 保持 Failed。<code>local_list_update</code> 返回 0 才改成 Accepted。运营平台把请求原文和结果写进日志。</p>
+
+  <h3 id="setprofile">SetChargingProfile</h3>
+  <p>先设成 Rejected。连接器不是 0 或 1，拒绝。<code>stackLevel</code> 大于等于 <code>ChargeProfileMaxStackLevel</code>，回 NotSupported。ChargePointMaxProfile 的连接器不是 0，拒绝。TxProfile 必须当前在准备、充电或暂停，并且事务号等于正在进行的 <code>transactionId</code>。同一条 TxProfile 里，计划号相同，或者堆叠级相同，就覆盖那一条。否则追加，条数到上限就拒绝。TxProfile 只留在内存。整桩上限和默认计划写进 <code>max_txdefault_profile</code>，同样按计划号，或按「堆叠级加用途」覆盖，然后写入外部闪存。运营平台把请求和结果写进日志。</p>
+
+  <h3 id="clearprofile">ClearChargingProfile</h3>
+  <p>带了连接器号、但不是 0 或 1，回 Unknown。三个条件都没带，删掉全部计划，回 Accepted。只带 id，按 id 删。只带用途，按用途删。只带堆叠级，按堆叠级删。用途和堆叠级都带，按两个一起删。删到了就 Accepted 并写外部闪存，没删到回 Unknown。</p>
+
+  <h3 id="composite">GetCompositeSchedule</h3>
+  <p>先设成 Accepted。连接器大于 1 或小于 0 改成 Rejected。否则调用 <code>sc_calc_schedule</code> 填合成计划，并在应答里带回连接器号。</p>
+
+  <h3 id="trigger">TriggerMessage</h3>
+  <p>默认拒绝。BootNotification 和 Heartbeat 接受，并把对应发送标志置 1。MeterValues 和 StatusNotification 只在连接器是 0 或 1 时接受，同样只置标志。别的请求类型保持拒绝。真正发出要等当前没有在等应答。MeterValues 即使这里 Accepted，安装测试模式在发出前仍会丢掉。运营平台把请求和结果写进日志。</p>
+
+  <h3 id="getdiag">GetDiagnostics</h3>
+  <p>先记下上传地址。带了开始或结束时间就解析，格式不对时开始时间用 0、结束时间用现在。没带也是这个默认。结束早于开始、结束早于本地日志起点、或开始晚于本地日志终点，应答里不带文件名，上传也不启动。时间有重叠时，把范围裁到本地日志的起止之内，记下重试次数和间隔，<code>enable</code> 置 1。文件名是 <code>log-桩号-开始-结束.txt</code>。随后在桩空闲时上传，过程用 DiagnosticsStatusNotification 报告。</p>
+
+  <h3 id="updatefw">UpdateFirmware</h3>
+  <p>已经有一次主控升级在进行，这条请求被忽略，应答仍按空的确认发出。没有在升级时，地点以 <code>WIFI-OTA-URL:</code> 开头，是给 ESP32 模组升级，把后面的地址放进 <code>wifi_fw_url</code>，并记下开始时刻。否则是主控固件，记下 URL、重试次数和间隔。retrieveDate 能解析就用那个时刻，否则用现在。<code>enable</code> 置 1，并标明这次不是签名升级。</p>
+
+  <h3 id="signedupdate">SignedUpdateFirmware</h3>
+  <p>已经有升级在进行，回 Rejected，并清掉签名升级标志。否则先校验签名证书。证书不过回 InvalidCertificate。通过后记下 URL、时间、重试、requestId、证书和签名，<code>enable</code> 置 1，签名升级标志置 1，回 Accepted。</p>
+
+  <h3 id="dtin">DataTransfer（平台发给桩）</h3>
+  <p>没有 messageId，或者 messageId 不认识，回 UnknownMessageId。认识的三个：</p>
+  <ul>
+    <li><code>GetCTClampValue</code>：回 Accepted。data 只有一相，<code>{"current":入户电流乘10,"voltage":L1电压乘100}</code>。桩自己上报的那条才会分三相，这里不分。</li>
+    <li><code>4GAT</code>：把 data 当成 4G 模组的 AT 命令，等 OK，超时 1 秒。成功回 Accepted 和模组应答。失败把 data 清空，回 Rejected。</li>
+    <li><code>WIFIAT</code>：同样把 data 发给 WiFi 模组，成功和失败的规则与 4GAT 相同。</li>
+  </ul>
+</section>
+
+<section id="offline">
+  <h2>断网时订单怎么补</h2>
+  <p>运营平台 Boot 是否被接受，会在空闲时拿来和上一次比较。刚变成已接受时，本地交易记录条数为 0 就把补传标志清掉，否则置 1。补传标志为 1 时，准备、充电、暂停不再发 StartTransaction，而是 <code>transaction_start_store</code>。结束时 <code>transaction_stop_store</code>。充电和暂停按采样间隔 <code>transaction_info_store</code>，不发上网。</p>
+  <p>补传按队列头部的类型发。开始记录发 StartTransaction，结束记录发 StopTransaction，过程记录发 MeterValues。应答到来就丢掉头部一条。类型对不上就把补传标志清掉，恢复发当前订单。补传期间，新的开始、结束、电量不会插到前面。</p>
+</section>
+</main>
+</body>
+</html>
