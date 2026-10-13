@@ -8,7 +8,7 @@
 <body>
 <header>
   <h1>2. 充电任务</h1>
-  <p><code>Charging_task</code> 由主循环 1 ms 节拍调用。状态函数只改状态和控制位。占空比、接触器、灯在同一次调用的末尾才落到硬件上。</p>
+  <p>先看整条充电怎么走完。三种启动方式只决定谁把授权位置 1，后面的准备、充电、暂停、结束是同一条路。再往下才是每一拍改哪些位。</p>
 </header>
 <nav class="top">
   <a href="index.html">目录</a>
@@ -16,6 +16,63 @@
   <a href="charge.html">2 充电</a>
 </nav>
 <main>
+<section id="overview">
+  <h2>2.0 整条充电怎么走</h2>
+  <p>参数 <code>sys_param.chargemode</code> 只有 1、2、3。出厂默认是 3。它只决定怎么把 <code>on_charging</code> 置 1。置 1 并且已经插枪之后，状态机不再区分是哪种方式启动的。</p>
+  <div class="flowv">
+    <div class="branch3">
+      <div class="node"><b>即插即充</b><span>模式 3。插枪超过 1 秒</span></div>
+      <div class="node"><b>刷卡</b><span>模式 2 本地卡直接启动。模式 1 还要看卡和平台</span></div>
+      <div class="node"><b>OCPP 服务器</b><span>只有模式 1 接受远程启动</span></div>
+    </div>
+    <div class="vedge">三种方式都是把 on_charging 写成 1，并记下 idTag</div>
+    <div class="node"><b>等待</b><span>已经插枪才离开。PWM 关，充电接触器关</span></div>
+    <div class="vedge">进入准备，并要求做一次漏电自检</div>
+    <div class="node"><b>准备</b><span>发 PWM，接触器仍断开。等车把 CP 拉到约 6 V</span></div>
+    <div class="vedge">6 V、电流 ≥ 6 A、二极管、漏电自检、PE 自检都完成，再保持 600 ms</div>
+    <div class="node"><b>充电</b><span>PWM 继续。电流 ≥ 6 A 才吸合接触器，枪线上锁</span></div>
+    <div class="branch">
+      <div>
+        <div class="vedge">车把 CP 收到约 9 V，枪还插着</div>
+        <div class="node"><b>暂停</b><span>接触器断开，PWM 还在。车回到 6 V 可再充</span></div>
+      </div>
+      <div>
+        <div class="vedge">拔枪，或刷卡、远程把授权清 0。严重故障也进这里</div>
+        <div class="node"><b>结束</b><span>PWM 关，接触器关。等 2.5 秒存电量，拔枪后回等待</span></div>
+      </div>
+    </div>
+  </div>
+
+  <h3>三种启动各做什么</h3>
+  <table>
+    <tr><th>方式</th><th>模式</th><th>怎样把授权置 1</th><th>怎样停</th></tr>
+    <tr><td>即插即充</td><td>3，注释里写成 PnC</td><td><code>user_auto_charge_check</code>：上电 8.5 秒之后，插枪超过 1 秒就置 1，卡号用免费卡。这个模式下刷卡的分支是空的，刷卡不会启动</td><td>同一函数里，充电、暂停、结束时若强制键按下，把授权清 0，原因 Local。拔枪也会结束。远程停止在模式 3 下，只要还在充电就接受</td></tr>
+    <tr><td>刷卡</td><td>2</td><td>必须是绑定卡、桩卡或充电点卡。等待、结束或预约卡号匹配时置 1，卡号就是这张卡的 UID。不向平台发 Authorize</td><td>同一张卡再刷，或桩卡、充电点卡再刷，授权清 0，原因 Local</td></tr>
+    <tr><td>刷卡，并走平台</td><td>1，注释里写成手机 APP 和 RFID</td><td>绑定卡、桩卡、充电点卡直接置 1。其它卡：平台已 Boot 成功就发 Authorize，本地预授权通过也可以直接置 1；平台不在线时看本地名单，未知卡只有 <code>AllowOfflineTxForUnknownId</code> 打开才置 1，并把 <code>auth_type</code> 记成 2</td><td>同一张卡、桩卡或充电点卡再刷，授权清 0，原因 Local</td></tr>
+    <tr><td>OCPP 服务器启动</td><td>只有 1</td><td><code>RemoteStartTransaction</code>。模式不是 1 直接拒绝。状态只能是等待、预约、准备或结束，连接器号只能是 0 或 1。接受后把报文里的 idTag 抄过来，授权置 1</td><td><code>RemoteStopTransaction</code> 的事务号和当前事务一致才清授权，原因 Remote。模式 3 不看事务号，只要还在充电就清</td></tr>
+  </table>
+  <p>模式 2 不接受服务器远程启动。光伏电流和离线超时也会把授权置 1，那两条不看 <code>chargemode</code>，卡号同样用免费卡。蓝牙在等待或准备时也可以置 1，在充电、暂停或结束时清 0。</p>
+
+  <h3>每个环节桩做什么</h3>
+  <table>
+    <tr><th>环节</th><th>这一段在做什么</th></tr>
+    <tr><td>等待</td><td>不发 CP 方波，充电接触器断开，电子锁解开。插上枪之后 OCPP 报 Preparing，没插枪报 Available。授权到了但超过 <code>ConnectionTimeOut</code> 秒还没插枪，授权取消</td></tr>
+    <tr><td>准备</td><td>按允许电流发 1 kHz PWM，告诉车可以充电，接触器仍断开。同时做二极管检测和漏电自检。枪线产品这时如果配置了“车端断开就解锁”，锁是松开的。车把 CP 拉到约 6 V 并保持 600 ms，才进入充电</td></tr>
+    <tr><td>充电</td><td>PWM 继续。允许电流不少于 6 A 时吸合充电接触器和 PE 接触器。枪线上锁。每秒计时，每 10 秒把累计电量写入 Flash。OCPP 报 Charging</td></tr>
+    <tr><td>暂停</td><td>车不再取电，或出现可恢复故障。充电接触器断开，PWM 仍按允许电流发，授权还在，订单不算结束。车回到约 6 V 并保持 600 ms，回到充电。OCPP 报 SuspendedEV 或 SuspendedEVSE</td></tr>
+    <tr><td>结束</td><td>PWM 关掉，CP 变常高，充电接触器断开。先等 2.5 秒，把本段结束时的累计电量存下来。枪还插着就停在这里，绿灯慢闪。拔枪后回到等待</td></tr>
+  </table>
+
+  <h3>故障会把桩带到哪</h3>
+  <p>检测函数只给出返回值。等待态把返回 1 和 2 都送进故障态，故障消失再回等待，这中间不充电。准备、充电、暂停才把 1 和 2 分成停机和暂停。</p>
+  <table>
+    <tr><th>返回</th><th>哪些故障</th><th>准备、充电、暂停时</th><th>输出</th></tr>
+    <tr><td>1</td><td>急停、漏电、PEN、过流、接地、接触器拒动或粘连、CP 异常。电子锁失败超过 30 秒也变成 1</td><td>立刻结束这次充电，不等电流下降</td><td>同一拍关掉 PWM 和充电接触器。漏电和 PEN 还会当拍拉开 PE 接触器。灯按故障码次数闪红</td></tr>
+    <tr><td>2</td><td>过压、欠压、过温、防拆、电表超时、二极管。电子锁失败后的前 30 秒</td><td>进暂停，授权不清。故障消失并且车仍在约 6 V、电流不少于 6 A，保持 600 ms 后回到充电</td><td>下一拍断开充电接触器，PWM 保持。过压、欠压当拍就拆充电接触器线圈。灯闪红</td></tr>
+    <tr><td>3</td><td>只有 DLB 通信失败</td><td>充电状态不动，订单继续</td><td>PWM 和接触器按原来的状态。灯改成紫色，闪 13 次</td></tr>
+  </table>
+  <p>每种故障怎么判，见 <a href="fault.html">故障</a>。下面从 2.1 起是每一拍、每一种条件的细节。</p>
+</section>
 <section id="task">
   <h2>2.1 每毫秒先做什么</h2>
   <p>测试模式不进这个任务。正常运行时顺序是：</p>
