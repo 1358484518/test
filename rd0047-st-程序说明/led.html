@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>2D. LED</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <h1>2D. LED</h1>
+  <p><code>set_led_proc</code> 在充电任务每毫秒的最后调用，只改颜色和动作。<code>light_process</code> 大约每 1 ms 由 TIM6 把缓冲刷进 8 颗灯珠。PC14 的运行灯不在这里，主循环每秒翻转一次。</p>
+</header>
+<nav class="top">
+  <a href="index.html">目录</a>
+  <a href="peripheral.html">1 外设</a>
+  <a href="charge.html">2 充电</a>
+</nav>
+<main>
+<section id="priority">
+  <h2>先看特殊标志，再看状态</h2>
+  <p>顺序是固定的，前面的分支成立就不再看充电状态。</p>
+  <ol>
+    <li><code>UserRcmbeepflag</code>：前 2 s 紫色常亮。漏电自检已成功则再绿闪 5 s，周期 900 ms、闪 5 次、间隔 2000 ms。然后标志清 0。</li>
+    <li><code>UserWIFIresetflag</code>：黄色常亮。</li>
+    <li><code>charge_fault == 1</code> 且故障码不是 13：红色，周期 500 ms，闪烁次数等于故障码，间隔 1500 ms。</li>
+    <li>故障码是 13（DLB 通信）：紫色，同样 500 ms、闪 13 次、间隔 1500 ms。这个码的返回值是 3，充电不一定停，灯会先被这条抢走。</li>
+  </ol>
+</section>
+
+<section id="state">
+  <h2>没有故障时按状态</h2>
+  <table>
+    <tr><th>状态</th><th>颜色</th><th>动作</th></tr>
+    <tr><td>等待，未插枪，正在绑卡</td><td>青</td><td>常亮</td></tr>
+    <tr><td>等待，未插枪，<code>chargemode == 1</code> 且网络切换状态不是 2。Boot 还没被接受</td><td>黄</td><td>常亮</td></tr>
+    <tr><td>等待，未插枪，<code>chargemode == 1</code> 且已经 Boot 成功，或切换状态已经是 2</td><td>蓝</td><td>常亮</td></tr>
+    <tr><td>等待，未插枪，其它模式。模式 3 且即插即充指示为 1、Boot 未接受</td><td>黄</td><td>常亮</td></tr>
+    <tr><td>等待，未插枪，其余情况</td><td>蓝</td><td>常亮</td></tr>
+    <tr><td>等待且已插枪，准备，暂停</td><td>蓝</td><td>周期 2000 ms 闪 1 次</td></tr>
+    <tr><td>充电</td><td>绿</td><td>流水，节拍 200。<code>light_set_scroller(200, 1)</code></td></tr>
+    <tr><td>结束</td><td>绿</td><td>周期 4000 ms 闪 1 次</td></tr>
+    <tr><td>预约</td><td>蓝</td><td>周期 4000 ms 闪 1 次</td></tr>
+    <tr><td>不可用</td><td>红</td><td>常亮</td></tr>
+    <tr><td>其它状态值</td><td>灭</td><td>无动作</td></tr>
+  </table>
+  <p>故障码 0 且 <code>charge_fault</code> 为 0 才走到这张表。返回 2 的过温、过欠压会把 <code>charge_fault</code> 置 1，所以暂停时若故障还在，看到的是红闪，不是蓝闪。</p>
+</section>
+</main>
+</body>
+</html>

@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>2A. 故障检测</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <h1>2A. 故障检测</h1>
+  <p>检测分散在 TIM6 和 <code>sysfault_check_proc</code>。充电任务每毫秒用 <code>SysState_Check_Fault</code> 的返回值决定停机还是暂停。</p>
+</header>
+<nav class="top">
+  <a href="index.html">目录</a>
+  <a href="peripheral.html">1 外设</a>
+  <a href="charge.html">2 充电</a>
+</nav>
+<main>
+<section id="ret">
+  <h2>返回值</h2>
+  <p>没有任何故障位时返回 0，<code>fault_code</code> 清 0。有故障时先把 <code>charge_fault</code> 置 1，蜂鸣三声，再按优先级取一个故障码。返回 1 是停机，返回 2 是暂停，返回 3 只有 DLB 通信失败。</p>
+  <table>
+    <tr><th>优先级</th><th>故障位</th><th>故障码</th><th>返回</th><th>灯色见 <a href="led.html">LED</a></th></tr>
+    <tr><td>1</td><td>急停 <code>EPO_Stop</code></td><td>9</td><td>1</td><td>红，闪 9 次</td></tr>
+    <tr><td>2</td><td>漏电，或 PEN。PE 继电器故障叠加 PEN 时先写成 14，若同时有 Type B 漏电再改回 1</td><td>1 或 14</td><td>1</td><td>红</td></tr>
+    <tr><td>3</td><td>过流</td><td>2</td><td>1</td><td>红</td></tr>
+    <tr><td>4</td><td>接地 PE 电压</td><td>3</td><td>1</td><td>红</td></tr>
+    <tr><td>5</td><td>接触器拒动或粘连</td><td>5</td><td>1</td><td>红</td></tr>
+    <tr><td>6</td><td>CP 异常</td><td>6</td><td>1</td><td>红</td></tr>
+    <tr><td>7</td><td>电子锁。失败后 30 s 内返回 2，之后返回 1</td><td>7</td><td>2，超时后 1</td><td>红</td></tr>
+    <tr><td>8</td><td>过温</td><td>8</td><td>2</td><td>红</td></tr>
+    <tr><td>9</td><td>过压或欠压</td><td>4</td><td>2。过压时取消这轮蜂鸣</td><td>红</td></tr>
+    <tr><td>10</td><td>防拆</td><td>10</td><td>2</td><td>红</td></tr>
+    <tr><td>11</td><td>电表超时</td><td>11</td><td>2</td><td>红</td></tr>
+    <tr><td>12</td><td>二极管</td><td>12</td><td>2</td><td>红</td></tr>
+    <tr><td>13</td><td>DLB 通信</td><td>13</td><td>3</td><td>紫。等待态不因此进故障态，充电态也不因此进暂停</td></tr>
+    <tr><td></td><td>其余非零位</td><td>99</td><td>1</td><td>红</td></tr>
+  </table>
+  <p>等待态把返回 1 和 2 都送进故障态。准备、充电、暂停只把返回 1 送进结束，返回 2 送进暂停。结束态不改状态，只按故障位写 OCPP 的 Faulted。</p>
+  <p><code>fault_waittime</code> 每毫秒加 1，超过 3000 后 TIM6 才跑电压、PE、锁。漏电和二极管从 50 µs 节拍就开始，但漏电自检期间 <code>StateSwitch_Check_Leakage</code> 直接返回。</p>
+</section>
+
+<section id="pe">
+  <h2>PE 漏电流</h2>
+  <p><code>StateSwitch_Check_PECur</code> 大约每 1 ms 一次。<code>GridPECurr</code> 打印时除以 1000 当成安培，所以比较用的是毫安。</p>
+  <table>
+    <tr><th>电流</th><th>要连续多少次才置 PEN</th></tr>
+    <tr><td>≥ 20 mA 且 &lt; 39 mA</td><td>100 次，约 100 ms</td></tr>
+    <tr><td>39～120 mA</td><td>60 次</td></tr>
+    <tr><td>&gt; 120 mA</td><td>1 次</td></tr>
+    <tr><td>&lt; 20 mA</td><td>计数递减。减到 0 且已经拔枪、又没处在“保持 PEN”时，才清故障</td></tr>
+  </table>
+  <p>置位当拍就把充电接触器和 PE 接触器的启动、保持全部拉低，<code>RL_action = 0</code>。上电 PE 自检把 <code>set_pen_fault_keep(1)</code>，这段时间拔枪也不能清 PEN。自检走完才 <code>set_pen_fault_keep(0)</code>。</p>
+  <p>另一路是 Type B 漏电模块。<code>StateSwitch_Check_Leakage</code> 每 50 µs 读脱扣脚，连续 10 次为高（约 0.5 ms）认为漏电。漏电自检还没成功时，即使脱扣脚是低，也置 <code>Leakage_Fault</code>。置位当拍拆全部接触器。清除必须拔枪。自检进行中这个函数直接返回，避免把测试脉冲当成漏电。</p>
+</section>
+
+<section id="diode">
+  <h2>二极管</h2>
+  <p><code>diode_check</code> 每 50 µs 一次。拔枪清故障。下面任一成立就本轮不算：PWM 没开、允许电流为 0、CP 比较值对应电流为 0、<code>diode_check_flag != 1</code>。</p>
+  <p>准备态在保护没被 bit0 关掉时把标志设成 1。然后累计 2000 次（100 ms）<code>DIODE_STATE</code>。高电平次数小于 2% 或大于 98% 判故障，否则判正常。结束后标志写成 2，准备态才允许进充电。bit0 置位时准备态直接写成 2，这 100 ms 不跑。</p>
+</section>
+
+<section id="volt">
+  <h2>过压、欠压、接地</h2>
+  <p><code>StateSwitch_Check_Volt</code> 大约每 1 ms 一次，看的是 <code>charge_data</code> 里的电压，单位 0.1 V。单相，或 <code>power_supply_mode == 1</code>，只判 L1。否则 L2、L3 用同一套上下限，但没有 L1 那种 265 V / 275 V 的快路径。</p>
+  <table>
+    <tr><th>L1</th><th>确认时间</th></tr>
+    <tr><td>≥ 275.0 V，或计量芯片中断脚低电平占空比等于 100</td><td>2 次，约 2 ms</td></tr>
+    <tr><td>≥ 265.0 V，或占空比 &gt; 50</td><td>2 次</td></tr>
+    <tr><td>≥ <code>upper_limit_protection_voltage</code></td><td><code>VOL_CHECK_TIME / 2</code>，450 次，约 450 ms</td></tr>
+    <tr><td>≤ <code>lower_limit_protection_voltage</code></td><td>900 次，约 900 ms</td></tr>
+  </table>
+  <p>过压置位后，电压回到窗口内仍要拔枪才清 <code>AC_OverVolt_Fault</code>。快路径会把 <code>L1_over_voltage_flag</code> 置 1，三相分支里只要这个标志还在，也是拔枪才清。欠压回到窗口就清。置位当拍拆接触器：单相只拉低 1 号充电接触器，三相两路都拉低。过欠压在状态机里是返回 2，充电中进暂停，不进故障态。</p>
+  <p>接地在 <code>StateSwitch_Check_PE_Volt</code>，同样约 1 ms 一次。<code>ground_disconnected_jadge</code> 连续真 4000 次（约 4 s）置 <code>PE_Fault</code>，并拆两路充电接触器。条件消失则计数递减，减到 0 就清，不必拔枪。用的是 <code>GridNPEVolt</code>，单位 0.1 V：</p>
+  <ul>
+    <li><code>power_supply_mode == 1</code>：把 L-PE 乘 1.73，再和 L-N 相减。绝对值 ≤ 20.0 V 认为接地还在，否则认为断开。</li>
+    <li>其它供电：还没故障时，三相且 N-PE ≥ 20.0 V 就断开；否则要 N-PE ≥ 70.0 V。已经故障时，N-PE ≥ 50.0 V 就保持断开。</li>
+  </ul>
+</section>
+
+<section id="other">
+  <h2>过流、过温、接触器、电表、防拆</h2>
+  <p>这些在 <code>sysfault_check_proc</code> 里，上电 3 s 后每毫秒一次。校准模式跳过过流和接触器。</p>
+  <ul>
+    <li>过流：电流单位 0.01 A。大于限额的 110% 且比限额高过 2.00 A 时两个计数都加。限额取额定电流，枪线还要再和 PP 取小。若限额大于当前 PWM 电流，再用 PWM 电流做同样比较，只加第二个计数。第一个计数到 3000（约 3 s）或第二个到 12000（约 12 s）置过流。清除要拔枪且两个计数都回到 0。</li>
+    <li>过温：<code>insideTem == 4095</code> 当成无效，清过温和降功率。≥ <code>max_temperature</code> 持续 5 s 置过温，状态机进暂停。降到 <code>max_temperature - 8</code> 以上持续 5 s 只降功率，不置故障，电流上限见 <a href="limit.html#temp">限流</a>。要降到 <code>max_temperature - 12</code> 以下才恢复。过温本身是返回 2。</li>
+    <li>接触器：充电态里该吸合的反馈为 0，累计 8000 ms 置拒动。非充电态反馈仍为 1，累计 10000 ms 置粘连。清除都要拔枪。</li>
+    <li>电表：<code>mid_meter_timeout_count</code> 或 <code>dlm_meter_timeout_count</code> 大于 20 置电表故障，返回 2，充电进暂停。</li>
+    <li>防拆：<code>StateSwitch_Check_Tamper</code> 读防拆脚，返回 2。</li>
+    <li>急停位来自 <code>gpio_handle.epo_state</code>。<code>StateSwitch_Check_EPO</code> 有函数，但 <code>sysfault_check_proc</code> 没有调用它。</li>
+  </ul>
+</section>
+</main>
+</body>
+</html>

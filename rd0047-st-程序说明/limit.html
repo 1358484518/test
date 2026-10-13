@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>2C. 电流限制</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <h1>2C. 电流限制</h1>
+  <p><code>set_current_proc</code> 每毫秒把额定电流往下裁。裁完小于 6 A 就变成 0，CP 常高，准备态不能进充电，充电态会放开接触器。</p>
+</header>
+<nav class="top">
+  <a href="index.html">目录</a>
+  <a href="peripheral.html">1 外设</a>
+  <a href="charge.html">2 充电</a>
+</nav>
+<main>
+<section id="order">
+  <h2>裁剪顺序</h2>
+  <p><code>pwm_enable == 0</code> 时直接 0，后面都不看。否则从 <code>rated_current</code> 开始：</p>
+  <ol>
+    <li>充电计划有效时，用 <code>sc_maxcurrent</code>。光伏模式非 0 则和 <code>solar_current</code> 取大。计划无效且光伏模式非 0，就只用 <code>solar_current</code>。</li>
+    <li>大于 <code>dlm_current</code> 则收成家庭负载允许值。</li>
+    <li>大于额定电流则收成额定电流。</li>
+    <li>枪线产品再和 PP 档取小。PP 为 0（未插枪）时，电流会被收成 0。</li>
+    <li>降功率标志有效时，按温度再收一档，见下面。</li>
+    <li>小于 6 A 写成 0。这个值记进 <code>demand_current</code>。</li>
+    <li>再和 <code>dlb_current</code> 取小。小于 6 A 再写成 0，得到 <code>pwm_current</code>。</li>
+  </ol>
+  <p>家庭负载和 DLB 是两套。前者是本桩用 CT 算出来的 <code>dlm_current</code>，后者是 RS485 主机下发的 <code>dlb_current</code>，最后一步才生效。</p>
+</section>
+
+<section id="profile">
+  <h2>充电计划</h2>
+  <p>主循环 500 ms 调 <code>check_ChargingProfile_valid</code> 和 <code>calc_ChargingProfile_limit</code>。有生效的 MaxProfile、TxProfile 或 TxDefaultProfile 时 <code>sc_profile_valid = 1</code>，<code>sc_maxcurrent</code> 取 Max 和 Tx（没有 Tx 就用 TxDefault）的较小值。三种都没有则计划无效，<code>sc_maxcurrent</code> 仍写成额定电流，但 <code>set_current_proc</code> 不会用它，除非光伏模式把计划分支打开。</p>
+</section>
+
+<section id="solar">
+  <h2>光伏</h2>
+  <p><code>solar_charging_process</code> 每 100 ms。模式为 0 时 <code>solar_current</code> 等于额定电流，不参与上面的取大或替换。</p>
+  <p>模式非 0 时，用多余光伏功率换电流。单相，或车被判成单相，除以 L1 电压。三相车除以三相电压之和。电压单位 0.1 V，所以功率乘 10。</p>
+<pre><code>若 solar_current_from_grid ≤ 0
+    可提供 = 允许从电网取的电流 + 多余光伏电流
+否则
+    多余光伏 ≤ 0 时，可提供 = 允许从电网取的电流
+    多余光伏 &gt; 0 时，两者相加</code></pre>
+  <p>可提供电流和当前 <code>solar_current</code> 都 ≥ 6 A，插枪超过 3 s，又还没授权，等待或结束态会把授权置 1，卡号用免费卡。这是光伏自己的启动，不经过刷卡。</p>
+  <p>升流和降流都要稳够 <code>solar_stable_time</code> 秒。最后 10 s 的采样做平均，才写入 <code>solar_current</code>。相等则把正在走的升、降计数清掉。</p>
+  <p>车是单相还是三相由 <code>ev_phase_judge</code> 看：充电中 L1 ≥ 5 A 且 L2、L3 都 &lt; 1 A 记成单相，否则三相。桩本身被判成单相时机型固定 <code>ev_phase = 1</code>。</p>
+</section>
+
+<section id="dlm">
+  <h2>家庭负载 DLM</h2>
+  <p><code>dlm_process</code> 每 100 ms。<code>power_distribution_enable == 0</code> 时 <code>dlm_current</code> 等于额定电流。</p>
+  <p>打开后，家庭上限是 <code>home_power_current - 2</code>，再减去其它负载电流 <code>house_other_cur</code>，小于 0 当 0。这就是可提供给桩的电流。</p>
+  <ul>
+    <li>可提供电流小于当前 <code>dlm_current</code>：落差大于 5 A 时滞回 5 s 档，否则 10 s 档。时间到了，奇数电流减 1 变成偶数，偶数直接采用。</li>
+    <li>可提供电流比当前大 2 A 以上：滞回 2～20 s，差距越大时间越短。时间到了，若当前小于 6 A 且可提供 ≥ 6 A，直接抬到 6 A，否则每次加 2 A。</li>
+  </ul>
+</section>
+
+<section id="dlb">
+  <h2>DLB</h2>
+  <p>拨码 3 为高（<code>bcd3_state == 0</code>）且 <code>dlb_mode != 0</code> 时，USART6 走 DLB 从站 <code>RS485_slave_process</code>。否则把通信故障清掉，<code>dlb_current</code> 拉回额定电流，从站逻辑不跑。</p>
+  <p><code>dlb_mode == 1</code> 时，60 s 没收到帧就置通信故障，电流收到 6 A。故障位让 <code>SysState_Check_Fault</code> 返回 3，灯变紫，充电状态本身不停。</p>
+  <p>收到帧后，<code>dlb_current</code> 只降不升，取报文里的电流。真正加回去在 5 s 任务 <code>dlb_current_ctrl</code>：只在 <code>dlb_mode == 1</code> 且正在充电时，每 5 s 加 1 A，直到追上报文值；报文更小则立刻跟上。等待、准备、暂停里 <code>dlb_current_reset</code> 会把模式 1 的电流打回 6 A。</p>
+</section>
+
+<section id="temp">
+  <h2>温度降功率</h2>
+  <p>过温前 8 ℃ 先降电流，不进暂停。标志 <code>down_power_charge</code> 由温度检测置位，见故障页。置位后按内部温度收上限：</p>
+  <table>
+    <tr><th>内部温度</th><th>电流上限</th></tr>
+    <tr><td>≥ 保护温度 − 2 ℃</td><td>16 A</td></tr>
+    <tr><td>≥ 保护温度 − 4 ℃</td><td>20 A</td></tr>
+    <tr><td>≥ 保护温度 − 6 ℃</td><td>24 A</td></tr>
+    <tr><td>≥ 保护温度 − 8 ℃</td><td>28 A</td></tr>
+    <tr><td>更低</td><td>32 A</td></tr>
+  </table>
+  <p>只在这个上限比当前电流更小时才替换。温度检测里，NTC 读数 4095 会清掉降功率标志。</p>
+</section>
+</main>
+</body>
+</html>
