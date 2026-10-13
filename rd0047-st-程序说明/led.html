@@ -8,7 +8,7 @@
 <body>
 <header>
   <h1>2D. LED</h1>
-  <p><code>set_led_proc</code> 在充电任务每毫秒的最后调用，只改颜色和动作。<code>light_process</code> 大约每 1 ms 由 TIM6 把缓冲刷进 8 颗灯珠。PC14 的运行灯不在这里，主循环每秒翻转一次。</p>
+  <p>灯在充电任务的最后一拍改颜色，TIM6 再把数据送到灯珠。车把 CP 收到 9 V 后状态是暂停：没有故障时蓝灯按 2 秒闪一次，PWM 仍在发。人停充或拔枪进入结束后，没有故障时绿灯按 4 秒闪一次。有故障码时红灯按故障码的次数闪，DLB 通信失败是紫灯，这两条比状态优先。</p>
 </header>
 <nav class="top">
   <a href="index.html">目录</a>

@@ -8,7 +8,7 @@
 <body>
 <header>
   <h1>2C. 电流限制</h1>
-  <p><code>set_current_proc</code> 每毫秒把额定电流往下裁。裁完小于 6 A 就变成 0，CP 常高，准备态不能进充电，充电态会放开接触器。</p>
+  <p>CP 上发出去的电流每毫秒重算一次，和车有没有把 CP 收到 9 V 无关。暂停态 <code>pwm_enable</code> 仍是 1，所以计划、光伏、家庭负载、DLB 裁出来的电流继续变成占空比。只有裁完小于 6 A，或 <code>pwm_enable</code> 为 0，比较值才写成 1000，CP 变常高。充电态里接触器使能还要这一拍的 <code>pwm_current ≥ 6</code> 才置 1。</p>
 </header>
 <nav class="top">
   <a href="index.html">目录</a>

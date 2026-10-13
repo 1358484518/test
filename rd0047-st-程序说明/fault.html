@@ -8,7 +8,7 @@
 <body>
 <header>
   <h1>2A. 故障检测</h1>
-  <p>检测分散在 TIM6 和 <code>sysfault_check_proc</code>。充电任务每毫秒用 <code>SysState_Check_Fault</code> 的返回值决定停机还是暂停。</p>
+  <p>充电任务不自己判电压和漏电。它每毫秒只看 <code>SysState_Check_Fault</code> 的返回值：0 当没有故障，1 从充电直接结束并关掉 PWM 和接触器，2 从充电进暂停（接触器下一拍才放开，PWM 保持），3 只有 DLB 通信失败，充电状态不动，灯改成紫色。</p>
 </header>
 <nav class="top">
   <a href="index.html">目录</a>
