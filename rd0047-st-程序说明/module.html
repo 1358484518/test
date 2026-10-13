@@ -8,7 +8,7 @@
 <body>
 <header>
   <h1>3. 充电各模块</h1>
-  <p>整条充电在 <a href="charge.html">充电</a> 那一页。这一页只写每个模块自己负责什么、条件是什么。</p>
+  <p>整件事在 <a href="charge.html">充电</a> 那一页。这一页每一节先说这个模块负责什么，再写它的判断条件。状态机决定处在哪个环节，授权决定能不能开始，CP 判断车要不要电，PWM 把电流变成方波，接触器和电子锁负责真正通电和锁枪。</p>
 </header>
 <nav class="top">
   <a href="index.html">目录</a>
@@ -20,7 +20,7 @@
 <main>
 <section id="task">
   <h2>状态机：每毫秒决定现在处在哪个环节</h2>
-  <p>测试模式不进这个任务。正常运行时顺序是：</p>
+  <p>状态机不直接拨线圈。它只根据授权、车的 CP 电压和故障返回值，决定桩现在是等待、准备、充电、暂停还是结束，并写下允许发波、允许吸合这几个位。测试模式不进这个任务。正常运行时每毫秒按这个顺序做：</p>
   <ol>
     <li><code>pe_contactor_detect</code>：上电约 2 s 内做 PE 接触器自检，结果给 <code>get_pe_realy_selfCheck_state</code>。</li>
     <li><code>sysfault_check_proc</code>：上电前 3 s 只累加 <code>fault_waittime</code>，之后才扫电流、温度、电表、接触器、CP、PP、DLB 通信和防拆。</li>
@@ -35,7 +35,7 @@
 
 <section id="auth">
   <h2>授权：谁把 on_charging 置 1 或清 0</h2>
-  <p>状态机不自己决定开始充电。它看 <code>on_charging</code>。这个位为 1，并且已经插枪，等待态才进准备。下面这些地方会改它。</p>
+  <p>授权位是“允许开始或继续这一次充电”。即插即充、刷卡、服务器远程启动都只改这一位。状态机看到它为 1 且枪已插上，才从等待进入准备。</p>
   <table>
     <tr><th>来源</th><th>置 1 的条件</th><th>清 0</th></tr>
     <tr><td>刷卡 <code>Card_Task</code></td><td>等待或结束且当前未授权；或预约中卡号匹配</td><td>同一张卡再刷</td></tr>
@@ -50,6 +50,7 @@
 
 <section id="state">
   <h2>状态：八个状态怎么转</h2>
+  <p>八个状态是桩对外报的环节。真正通电只发生在“充电”。暂停仍然发 PWM，结束才把 PWM 关掉。</p>
   <div class="flowv">
     <div class="node"><b>等待</b><span>PWM 关，充电接触器关</span></div>
     <div class="vedge">on_charging 为 1，并且已经插枪。同时要求做漏电自检，二极管标志清 0</div>
@@ -155,6 +156,7 @@
 
 <section id="cp">
   <h2>CP：判断插枪，以及 12 V、9 V、6 V</h2>
+  <p>CP 是桩和车之间的那根信号线。约 12 V 表示没插枪或车已断开，约 9 V 表示插着但车不取电，约 6 V 表示车要求充电。状态机不自己量电压，它用这里分好的档。</p>
   <p>状态机读的是 <code>adc_handle.CPVolt</code>，单位 0.1 V。这个值每 5 ms 由 <code>adc_cp_calc</code> 重写：对 <code>ADC_DCCP_Buf</code> 做平均再加 10。缓冲来自 PA3（引脚名 <code>ADC_version</code>），换算是采样值 × 3.3 / 4096 × 10 × 11 / 3。PC0 的 CP 通道也在填 <code>ADC_CP_Buf</code>，但把它写进 <code>CPVolt</code> 的几行都注释掉了，10 ms 任务只把这块缓冲清掉。</p>
   <p>分档在 <code>StateSwitch_CP1_Check</code>，上电 3 秒后每 1 ms 看一次当时的 <code>CPVolt</code>。电压要连续落在窗口里才改档。改档和拆接触器不是同一个函数：<code>CP_break_pro</code> 只在那次 5 ms 的 <code>adc_cp_calc</code> 里调用。</p>
   <table>
@@ -176,6 +178,7 @@
 
 <section id="pwm">
   <h2>PWM：把允许电流换成占空比</h2>
+  <p>PWM 是 CP 线上 1 kHz 的方波，占空比告诉车允许多少安。电流为 0 时不发方波，CP 保持常高，车看到的是“现在不许充”。</p>
   <p><code>set_current_proc</code> 先算出允许电流 I，单位 A，见 <a href="limit.html">限流</a>。I 小于 6，或 <code>pwm_enable == 0</code>，都不进下面的公式，直接 <code>CP_PWM_SetDuty(1000)</code>。</p>
   <p><code>CP_PWM_SetCurrent</code> 里，I 先被限制在 6～63。占空比是百分数，不是小数。比较值写入 TIM4 通道 4，周期寄存器是 999，极性为高，所以高电平时间比例等于比较值 / 1000。</p>
 <pre><code>I = 0，或 pwm_enable = 0：
@@ -204,6 +207,7 @@
 
 <section id="relay">
   <h2>接触器：按使能位吸合或断开</h2>
+  <p>接触器是真正把市电送到枪上的继电器。状态机只把“允许吸合”置 1，这一节才根据锁是否锁好、有没有漏电和过欠压，去驱动线圈。PE 接触器是另一路，用来接通保护地。</p>
   <p><code>set_contactor_proc</code> 每 1 ms 决定吸合还是断开，真正拨线圈的是 50 µs 节拍里的 <code>RL_ctrl</code>。TIM6 每 20 ms 把 <code>RL_allow</code> 置 1，<code>RL_ctrl</code> 才在随后几次 50 µs 调用里动作。</p>
   <h3>充电接触器</h3>
   <p>吸合条件要同时成立：没有漏电、没有过压、没有欠压，<code>contactor_enable == 1</code>，并且是枪座，或电子锁反馈已经保持 <code>DURATION_TIME + 400</code> ms（500 ms）。然后每 500 ms 把 <code>RL_action</code> 置 1，延时计数清 0。</p>
@@ -217,7 +221,8 @@
 
 <section id="lock">
   <h2>电子锁：枪线上锁，枪座不锁</h2>
-  <p><code>pp_charge_enable == 0</code> 时 <code>set_lock_proc</code> 直接返回，枪座不上锁。上电后先空等 3000 次调用（约 3 s）。</p>
+  <p>枪线产品在充电时把插头锁住，防止带电拔枪。枪座没有这把锁，函数直接返回。锁住之后，接触器才允许吸合。</p>
+  <p><code>pp_charge_enable == 0</code> 时 <code>set_lock_proc</code> 直接返回。上电后先空等 3000 次调用（约 3 s）。</p>
   <p>相电压过低计数 <code>lowvoltage_count &gt; 500</code> 时直接 <code>locker_unlock_100</code>，占空比 100，并在 50 µs 任务里把 4G 电源宏写成关。这和 PD0 实际被配成输入是同一件事，见外设页。</p>
   <p>否则分两种：</p>
   <ul>

@@ -8,7 +8,7 @@
 <body>
 <header>
   <h1>2C. 电流限制</h1>
-  <p>CP 上发出去的电流每毫秒重算一次，和车有没有把 CP 收到 9 V 无关。暂停态 <code>pwm_enable</code> 仍是 1，所以计划、光伏、家庭负载、DLB 裁出来的电流继续变成占空比。只有裁完小于 6 A，或 <code>pwm_enable</code> 为 0，比较值才写成 1000，CP 变常高。充电态里接触器使能还要这一拍的 <code>pwm_current ≥ 6</code> 才置 1。</p>
+  <p>桩不会一直用额定电流充。每毫秒把几道上限叠在一起，得到最后发给车的电流。小于 6 A 就不发方波，接触器也不合。</p>
 </header>
 <nav class="top">
   <a href="index.html">目录</a>
@@ -18,6 +18,17 @@
   <a href="module.html">3 模块</a>
 </nav>
 <main>
+<section id="words">
+  <h2>先分清三道限制</h2>
+  <p>充电计划是平台规定某个时段最多充多少安。下面三个是现场自己算出来的，名字容易混。</p>
+  <table>
+    <tr><th>名字</th><th>它在管什么</th><th>关掉时</th></tr>
+    <tr><td>家庭负载</td><td>这一户房子的入户电流。允许的总电流减去空调等其它家电之后，剩下的才给桩。家电一开，桩就让电流。代码里叫 <code>dlm_current</code></td><td><code>power_distribution_enable</code> 为 0，电流保持额定值</td></tr>
+    <tr><td>光伏</td><td>尽量只用屋顶多出来的电。多余功率换成电流，还可以再允许从电网取一点。电流够 6 A 且插枪超过 3 秒时，它自己就能把充电授权打开。代码里叫 <code>solar_current</code></td><td><code>solar_mode</code> 为 0，光伏电流等于额定电流，不参与限制</td></tr>
+    <tr><td>DLB</td><td>外面一台主机用 RS485 告诉这台桩现在允许多少安。桩是从站。主机让减就马上减，让加则每 5 秒才加 1 A。60 秒没有报文就把电流收到 6 A，灯变紫，充电状态不停</td><td><code>dlb_mode</code> 为 0，或拨码 3 选的是外置电表。这时 <code>dlb_current</code> 保持额定值</td></tr>
+  </table>
+  <p>三道叠在一起的顺序是：光伏先决定起点，家庭负载再压到房子还剩的容量，DLB 最后再压一次。车把 CP 收到 9 V 只是暂停，这几道限制仍会继续算成占空比。只有结果小于 6 A，或这一拍不允许发波，CP 才变成常高。</p>
+</section>
 <section id="order">
   <h2>裁剪顺序</h2>
   <p><code>pwm_enable == 0</code> 时直接 0，后面都不看。否则从 <code>rated_current</code> 开始：</p>

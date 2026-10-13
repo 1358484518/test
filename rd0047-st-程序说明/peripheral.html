@@ -8,7 +8,7 @@
 <body>
 <header>
   <h1>1. 外设</h1>
-  <p>芯片是 STM32H573VIT6。引脚名来自 <code>main.h</code>，外设参数来自 <code>gpio.c</code>、<code>tim.c</code>、<code>adc.c</code>、<code>spi.c</code>、<code>usart.c</code>。谁在用这些脚，按调用点写。</p>
+  <p>这页回答板上每一根脚和每一个片内外设是干什么的。GPIO 负责接触器、拨码和复位，定时器负责灯珠、电子锁、CP 方波和蜂鸣器，ADC 负责电压电流温度，两路 SPI 分别接存储和网口，六路串口分别接调试、WiFi、计量、RS485、4G 和读卡。下面再写每路的引脚、频率和谁在调用。</p>
 </header>
 <nav class="top">
   <a href="index.html">目录</a>
