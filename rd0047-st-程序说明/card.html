@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>刷卡</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <h1>刷卡</h1>
+  <p>刷卡是把一张 RFID 卡变成充电授权。读卡器在 UART7，115200。主循环每 10 ms 问一次有没有卡。卡靠近会响一声。能不能启动，要看充电模式和这张卡是不是这台桩认识的卡。即插即充模式里，刷卡不会开始充电。</p>
+</header>
+<nav class="top">
+  <a href="index.html">目录</a>
+  <a href="report.html">读码</a>
+  <a href="peripheral.html">1 外设</a>
+  <a href="charge.html">2 充电</a>
+  <a href="module.html">3 模块</a>
+  <a href="net.html">网络</a>
+  <a href="card.html">刷卡</a>
+</nav>
+<main>
+<section id="flow">
+  <h2>一次刷卡怎么走</h2>
+  <div class="flowv">
+    <div class="node"><b>寻卡</b><span>每 10 ms 若读卡器空闲，就发一次寻卡。500 ms 没有回应就再问一次。M1 密钥 123456 的下发函数写了，但没有被调用</span></div>
+    <div class="vedge">读卡器回报成功</div>
+    <div class="node"><b>读出卡号</b><span>蜂鸣一声。普通卡只有 UID。带数据的卡再读出类型、桩号和卡状态</span></div>
+    <div class="vedge">还没插枪，并且桩在等待</div>
+    <div class="node"><b>管理卡先处理</b><span>添加卡切换绑卡模式。清除卡把本地名单清掉</span></div>
+    <div class="vedge">然后按充电模式决定启停</div>
+    <div class="branch3">
+      <div class="node"><b>模式 1</b><span>桩卡、绑定卡直接启动。其它卡问平台或本地名单</span></div>
+      <div class="node"><b>模式 2</b><span>只有绑定卡、桩卡、充电点卡能启动，不问平台</span></div>
+      <div class="node"><b>模式 3</b><span>刷卡不启动，也不停止</span></div>
+    </div>
+    <div class="vedge">处理完继续寻卡，直到这张卡离开</div>
+  </div>
+  <p>寻卡、读卡、离开都在 <code>rfid_task</code>。读到一帧先 <code>upcmd_unpack</code>，解包失败就丢掉。正在绑卡时如果枪已经插上，绑卡模式会被关掉。</p>
+</section>
+
+<section id="kinds">
+  <h2>桩认识哪几种卡</h2>
+  <table>
+    <tr><th>卡</th><th>怎么认</th><th>用来做什么</th></tr>
+    <tr><td>绑定卡</td><td>UID 在 <code>sys_param.idtag</code> 里，最多 10 张，或者在 <code>rfid_whitelist</code> 里</td><td>模式 1 和模式 2 都能直接启动</td></tr>
+    <tr><td>桩卡</td><td>类型 <code>0x33</code>，卡里的序列号等于这台桩的 <code>sn</code>。类型仍是 <code>0x33</code>、卡状态是 9、并且序列号从第 5 字节起 8 字节相同，也算桩卡</td><td>直接启动。充电中再刷可以停止，不管当时是不是这张卡启动的</td></tr>
+    <tr><td>充电点卡</td><td>类型 <code>0x33</code>，卡里的序列号等于 <code>chargerID</code></td><td>和桩卡一样，能启动也能停止</td></tr>
+    <tr><td>添加卡</td><td>类型 3，序列号前 6 个字符和桩序列号相同</td><td>只在没插枪且处于等待时有用。刷一下进入绑卡，再刷一下退出。进入绑卡时如果强制键已经按得很久，会先把现有绑定名单清掉</td></tr>
+    <tr><td>清除卡</td><td>类型 4，序列号前 6 个字符和桩序列号相同</td><td>没插枪且处于等待时，把 <code>idtag</code> 全部清掉并要求保存</td></tr>
+    <tr><td>普通卡</td><td>上面都不是，只有 UID</td><td>模式 1 里交给平台或本地授权名单。模式 2 里不能启动</td></tr>
+  </table>
+  <p>绑卡模式下，再刷一张还没绑定的卡，UID 会追加进 <code>idtag</code>。名单满了就不再加。这些修改都是把 <code>save_config</code> 置 1，由后面的保存流程写入 Flash。</p>
+</section>
+
+<section id="mode">
+  <h2>三种模式下刷卡做什么</h2>
+  <p>能开始的时机是：等待或结束，并且当前没有授权；或者正在预约，而这张卡的 UID 和预约卡号相同，本地授权校验也认这张卡。能停止的时机是：授权还在。停止原因记成 Local。</p>
+  <h3>模式 1：刷卡，并可以问平台</h3>
+  <p>绑定卡、桩卡、充电点卡把 <code>auth_type</code> 记成 1，卡号抄进 <code>idTag</code>，<code>on_charging</code> 置 1，不再问平台。</p>
+  <p>其它卡：</p>
+  <ul>
+    <li>运营平台已经 Boot 成功。开了本地预授权并且本地名单通过，就直接置授权。否则只把卡号记下来，置 <code>AuthorizeSendFlag</code>，等平台的 Authorize 结果。这一拍还不会把 <code>on_charging</code> 置 1。</li>
+    <li>平台不在线，并且允许离线本地授权。本地名单通过就直接启动。名单明确说未知、同时又允许未知卡离线交易，也启动，并把 <code>auth_type</code> 记成 2。这种卡后面若电量超过 <code>MaxEnergyOnInvalidId</code>，充电任务会取消授权。</li>
+    <li>平台不在线，又没开离线本地授权：这张卡什么都不做。</li>
+  </ul>
+  <p>停止时，桩卡、充电点卡可以直接停。普通卡必须 UID 和当前 <code>idTag</code> 相同，或者本地授权校验认它是同一张卡。</p>
+  <h3>模式 2：只认本地卡</h3>
+  <p>不向平台发 Authorize。绑定卡、桩卡、充电点卡满足开始条件就置授权，卡号就是 UID。正在充电时，同一张卡、桩卡或充电点卡再刷，授权清 0。</p>
+  <h3>模式 3：即插即充</h3>
+  <p>刷卡分支是空的。插枪后的自动启动不看卡。管理卡的绑卡、清名单仍然有效，因为那段在模式判断之前，而且要求还没插枪。</p>
+</section>
+</main>
+</body>
+</html>
