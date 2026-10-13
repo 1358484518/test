@@ -8,7 +8,7 @@
 <body>
 <header>
   <h1>2C. 电流限制</h1>
-  <p>桩不会一直用额定电流充。每毫秒把几道上限叠在一起，得到最后发给车的电流。小于 6 A 就不发方波，接触器也不合。</p>
+  <p>智能充电不另开一种充电模式。桩已经允许充电之后，用充电计划、光伏、家庭负载把允许多少安改小。小于 6 A 就不发方波，接触器也不合。DLB 和温度降功率也限制电流，但它们不在智能充电这个文件里，叠在最后。</p>
 </header>
 <nav class="top">
   <a href="index.html">目录</a>
@@ -20,9 +20,21 @@
   <a href="card.html">刷卡</a>
 </nav>
 <main>
+<section id="smart">
+  <h2>智能充电里有什么</h2>
+  <p>代码在 <code>Smart_Charge_Handle.c</code>。它只改电流上限，不改授权以外的充电状态。光伏在电流够用时会自己把授权打开，那是这一组里唯一会启动充电的。</p>
+  <table>
+    <tr><th>功能</th><th>它在管什么</th><th>多久算一次</th></tr>
+    <tr><td>充电计划</td><td>平台规定某个时段最多充多少安。整桩上限和这一次订单的计划取较小值，结果是 <code>sc_maxcurrent</code></td><td>500 ms</td></tr>
+    <tr><td>光伏</td><td>尽量只用屋顶多出来的电。结果是 <code>solar_current</code>。充电中另外记一份确实来自光伏的电量</td><td>100 ms</td></tr>
+    <tr><td>家庭负载</td><td>入户允许电流减去其它家电，剩下的给桩。结果是 <code>dlm_current</code>。加减都要等几秒，避免家电开关时来回跳</td><td>100 ms</td></tr>
+    <tr><td>电流互感器</td><td>每秒用 UDP 收发各相电流。家庭负载和光伏用的就是这组数。三相桩还会判断车实际用的是单相还是三相</td><td>1 s</td></tr>
+  </table>
+  <p>叠在一起时，充电计划或光伏先定起点，家庭负载再往下压。DLB 在 <code>set_current_proc</code> 的最后再压一次。温度降功率插在额定电流和枪线限流之后。</p>
+</section>
 <section id="words">
-  <h2>先分清三道限制</h2>
-  <p>充电计划是平台规定某个时段最多充多少安。下面三个是现场自己算出来的，名字容易混。</p>
+  <h2>先分清现场的三道限制</h2>
+  <p>充电计划来自平台。下面三个是现场自己算出来的，名字容易混。</p>
   <table>
     <tr><th>名字</th><th>它在管什么</th><th>关掉时</th></tr>
     <tr><td>家庭负载</td><td>这一户房子的入户电流。允许的总电流减去空调等其它家电之后，剩下的才给桩。家电一开，桩就让电流。代码里叫 <code>dlm_current</code></td><td><code>power_distribution_enable</code> 为 0，电流保持额定值</td></tr>
@@ -48,7 +60,21 @@
 
 <section id="profile">
   <h2>充电计划</h2>
-  <p>主循环 500 ms 调 <code>check_ChargingProfile_valid</code> 和 <code>calc_ChargingProfile_limit</code>。有生效的 MaxProfile、TxProfile 或 TxDefaultProfile 时 <code>sc_profile_valid = 1</code>，<code>sc_maxcurrent</code> 取 Max 和 Tx（没有 Tx 就用 TxDefault）的较小值。三种都没有则计划无效，<code>sc_maxcurrent</code> 仍写成额定电流，但 <code>set_current_proc</code> 不会用它，除非光伏模式把计划分支打开。</p>
+  <p>充电计划是 OCPP 的 ChargingProfile。它不决定能不能充电，只规定某个时段最多充多少安。每 500 ms 先删掉已经过期的计划，再算出 <code>sc_maxcurrent</code>。一种都没生效时 <code>sc_profile_valid</code> 为 0，后面的电流裁剪不用这个值。</p>
+  <table>
+    <tr><th>种类</th><th>管什么</th><th>什么时候丢掉</th></tr>
+    <tr><td>ChargePointMaxProfile</td><td>整桩上限，不管现在有没有订单</td><td>过了 <code>validTo</code></td></tr>
+    <tr><td>TxDefaultProfile</td><td>默认的订单计划。这次订单没有单独计划时用它</td><td>过了 <code>validTo</code></td></tr>
+    <tr><td>TxProfile</td><td>只约束这一次订单</td><td>授权被清掉，或进入结束态，整份列表清掉。过了 <code>validTo</code> 也会删</td></tr>
+  </table>
+  <p>同一种里 <code>stackLevel</code> 更大的那条生效。还没到 <code>validFrom</code> 的先不用。整桩上限和订单计划都在时，<code>sc_maxcurrent</code> 取较小的那个。订单计划有 TxProfile 就用它，没有才用 TxDefaultProfile。</p>
+  <p>时间表有三种算法：</p>
+  <ul>
+    <li>每天或每周重复：按当天或当周已经过去的秒数，对上时间表里的时段。</li>
+    <li>绝对时间：从 <code>startSchedule</code> 那个时刻起算。</li>
+    <li>相对时间：从这次订单开始起算。订单开始是桩第一次离开等待，进入准备、充电或暂停的那一刻。</li>
+  </ul>
+  <p>限值单位是安培就直接用。单位是瓦特就除以 230，再除以相数，换成电流。<code>sc_maxcurrent</code> 还要再和光伏、家庭负载、DLB 一起裁，不是发到 CP 上的最终电流。</p>
 </section>
 
 <section id="solar">
