@@ -238,6 +238,11 @@
   <h3>话发出去了，平台没回</h3>
   <p>StartTransaction、MeterValues 或 StopTransaction 已经发出，超时次数到 3，或者网络检查失败。当时还没在补发的话，把这条没收到应答的按同样格式写进 Flash，然后断开。已经在补发时不再写，避免同一条记两次。重连并且 Boot 被接受后，从这条开始按上面的顺序补发。</p>
 
+  <h3 id="flash">能存多少条，存在哪</h3>
+  <p>离线的开始、电量、结束存在外部 SPI Flash 的 <code>0x003E0000</code> 到 <code>0x00400000</code>，一共 128 KB。前面两扇区不放报文：<code>0x003E0000</code> 这一扇区记魔术字和读写指针，指针日志写满就擦掉重写最新的一对；<code>0x003E1000</code> 这一扇区只放事务号。真正的报文从 <code>0x003E2000</code> 起，到 <code>0x00400000</code> 止，30 个 4 KB 扇区。</p>
+  <p>每一格固定 38 字节，一扇区 4096÷38 得到 107 格，30 扇区一共 <code>TR_MAX_NUM</code> 等于 3210 条。开始记录本身就是 38 字节，结束是 34 字节，电量是 30 字节，地址仍按 38 字节往后排。写指针走到 3210 就回到 0 继续写，代码里没有“满了就不再记”的判断，新的一条会盖住被绕回去的那一格。</p>
+  <p>电量还有一个变慢的门槛，只在 WebSocket 没连上时使用。队列条数还小于 <code>86400 / 采样间隔 + 48</code> 时，按 <code>MeterValueSampleInterval</code> 写。到了这个数就改成一小时一条。默认间隔 60 秒时，门槛是 1488 条，比 3210 先到。开始和结束不受这个门槛限制，该写还是写。采样间隔配成 0 时不写电量。</p>
+
   <h3 id="powerloss">充电中整机断电</h3>
   <p>进入充电时 <code>charge_preparing</code> 把 <code>is_charging</code> 写成 1，并调用 <code>transaction_flag_store</code> 写到外部 Flash。从暂停回到充电时，如果这个标志还是 0，会再写一次。正常走到结束，<code>check_stop_charge_condition</code> 返回 0，就把标志写成 0 再存一次。中途掉电走不到这次清零，Flash 里一直留着 1。</p>
   <p>下次上电，<code>main</code> 调用 <code>DEV_Init</code>。它先 <code>transaction_energy_init_V2</code> 把累计电量读回来，再 <code>offline_init</code>，里面的 <code>transaction_flag_init</code> 从 Flash 读 <code>is_charging</code>。仍是 1 时，停止原因写成 <code>Reason_PowerLoss</code>，调用 <code>transaction_stop_store(0)</code>。参数 0 表示电量用 <code>charge_data.energy</code>，类型是结束。卡号那一行是注释掉的，所以这条没有 idTag。写完把 <code>is_charging</code> 清 0，再 <code>transaction_flag_store</code>。开机这一步只追加记录，不发送。</p>
