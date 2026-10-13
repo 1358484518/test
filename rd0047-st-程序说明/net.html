@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>网络</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <h1>网络</h1>
+  <p>桩上网是为了连 OCPP 平台。有线、WiFi、4G 三条都能扛这条连接，优先级是有线高于 WiFi，WiFi 高于 4G。蓝牙不负责上网，它和 WiFi 共用同一颗 ESP32，用来给手机配网和改参数。网页只挂在有线网口上。</p>
+</header>
+<nav class="top">
+  <a href="index.html">目录</a>
+  <a href="report.html">读码</a>
+  <a href="peripheral.html">1 外设</a>
+  <a href="charge.html">2 充电</a>
+  <a href="module.html">3 模块</a>
+  <a href="net.html">网络</a>
+</nav>
+<main>
+<section id="links">
+  <h2>四条链路分别是什么</h2>
+  <table>
+    <tr><th>链路</th><th>它是什么</th><th>硬件</th></tr>
+    <tr><td>W5500 有线</td><td>插网线连路由器。DHCP 拿到地址后，用 TCP 连 OCPP。同一颗芯片上还跑网页，端口 8080</td><td>SPI2，片选 PB12，复位 PD14，中断 PB10</td></tr>
+    <tr><td>WiFi</td><td>ESP32 连路由器，再由它代开到平台的 TCP。和蓝牙轮流用同一条串口</td><td>USART2，PD5/PD6，115200。复位脚 PE4</td></tr>
+    <tr><td>蓝牙</td><td>手机 App 连上来改 WiFi、服务器、电流、充电模式，也可以启停充电和传升级包。它自己不连 OCPP</td><td>和 WiFi 同一颗 ESP32</td></tr>
+    <tr><td>4G</td><td>蜂窝模组用 APN 上网，再开到平台的 TCP。平台不在、WiFi 和网线也没有时才用它</td><td>UART4，PB8/PB9，115200。复位脚 PE0</td></tr>
+  </table>
+  <p>同时可以存在两路 OCPP。<code>OCPP_NET</code> 是运营平台，<code>OCPP2_NET</code> 是管理平台，只在 <code>ocpp_admin_mode &gt; 0</code> 时才连。两路走同一条物理链路，套接字号分别是 0 和 1。地址以 <code>wss://</code> 开头就走 TLS，否则明文 TCP。</p>
+  <div class="flowv">
+    <div class="node"><b>配置时先选一条</b><span>使能位里有有线就用有线，否则有 WiFi 用 WiFi，否则用 4G</span></div>
+    <div class="vedge">运行中当前这条的 TCP 断了</div>
+    <div class="node"><b>往下切换</b><span>有线断了先试 WiFi，再试 4G。WiFi 断了试 4G</span></div>
+    <div class="vedge">更高优先级的 TCP 又通了</div>
+    <div class="node"><b>往回切换</b><span>4G 上若有线或 WiFi 已连通，就升回去。WiFi 上若有线已连通，就改走有线</span></div>
+  </div>
+  <p>判断“这条可用”看的是该接口自己的 TCP 是否已经连上，不是只看网线插没插。切换发生在 5 ms 的 <code>net_process</code>。WiFi 正在给模组做 OTA 时，这个函数直接返回，不切换。</p>
+</section>
+
+<section id="w5500">
+  <h2>有线：W5500</h2>
+  <p><code>LAN_Manager</code> 每 5 ms 跑一次。芯片还没认到就每隔一段时间再探测一次。认到之后做初始化、DHCP，再给两路 OCPP 建 TCP。网线拔掉会把两路有线 TCP 标志清掉。</p>
+  <p>PB10 下降沿只把 <code>W5500IRQFlag</code> 置 1，真正读芯片在 <code>W5500IRQHander</code>。</p>
+</section>
+
+<section id="wifi">
+  <h2>WiFi 和蓝牙共用一颗模组</h2>
+  <p>ESP32 的串口同一时刻只能做一件事。<code>esp32_process</code> 每 5 ms 在这几个状态里转：上电初始化、打开蓝牙、打开 WiFi，然后在“处理蓝牙”和“处理 WiFi”之间来回。蓝牙还有数据要发时，不进入 WiFi 处理。WiFi 处理返回后回到蓝牙。蓝牙没连着且 WiFi 出错，就复位模组再来一遍。</p>
+  <p>手机蓝牙连上、而当前 OCPP 又不是走 WiFi 时，<code>bt_priority_swithch</code> 把 WiFi 串口中断优先级抬高，让配网先于 4G。断开后再按当前上网接口把优先级放回去。</p>
+</section>
+
+<section id="web">
+  <h2>有线网页</h2>
+  <p>网页服务器只在 W5500 上，监听 8080，不经过 WiFi 或 4G。浏览器拿到的是桩里存的页面。</p>
+  <table>
+    <tr><th>请求</th><th>做什么</th></tr>
+    <tr><td>GET <code>/</code>、<code>/index.html</code></td><td>配置页</td></tr>
+    <tr><td>GET <code>/w5500.js</code></td><td>页面脚本</td></tr>
+    <tr><td>POST <code>/login.cgi</code></td><td>登录</td></tr>
+    <tr><td>POST <code>/config.cgi</code></td><td>改 IP、网关、WiFi、服务器、电流、充电模式、APN、时间等，然后写参数</td></tr>
+    <tr><td>POST <code>/firmware.cgi</code></td><td>从网页上传主控升级包</td></tr>
+  </table>
+  <p>不认识的 GET 回 404，不认识的 POST 回 403。</p>
+</section>
+
+<section id="bt">
+  <h2>蓝牙在处理什么</h2>
+  <p>手机先发连接命令，桩才接受后面的命令。还没通过密码时，只放行连接、退出、密码、读设备信息和读充电状态。密码通过之后才能改配置和控制充电。</p>
+  <table>
+    <tr><th>一类命令</th><th>用来做什么</th></tr>
+    <tr><td>0x21 起</td><td>连接、退出、密码、改密码、读设备信息</td></tr>
+    <tr><td>0x31 起</td><td>WiFi、服务器地址和账号、额定电流、4G、充电模式</td></tr>
+    <tr><td>0x41 起</td><td>读充电状态和本次充电信息</td></tr>
+    <tr><td>0x43 起</td><td>家庭负载、灯、光伏、免费卡号</td></tr>
+    <tr><td>0x51 起</td><td>启停充电、电子锁、蜂鸣器</td></tr>
+    <tr><td>0x60 起</td><td>选择上网方式、改有线地址</td></tr>
+    <tr><td>0x70 起</td><td>序列号、恢复出厂、WiFi 列表、相序</td></tr>
+    <tr><td>0x78 起</td><td>请求升级、下发固件、校验</td></tr>
+    <tr><td>0x80 起</td><td>DLB 模式、保护开关、RFID 名单、通用读写</td></tr>
+  </table>
+</section>
+
+<section id="upgrade">
+  <h2>程序升级有三条路</h2>
+  <p>三条路升的不是同一块程序。充电中、准备、暂停、结束时，主控升级和日志上传都先不做。</p>
+  <table>
+    <tr><th>升什么</th><th>从哪触发</th><th>怎么做</th></tr>
+    <tr><td>主控固件</td><td>OCPP 的 UpdateFirmware，或网页 <code>/firmware.cgi</code>，或蓝牙 0x78</td><td><code>do_firmware_update</code> 按 URL 下载到外部 Flash。地址是 https 时走管理平台那路 TLS。下完做签名校验。进行中 <code>fw_update</code> 置 1，灯改成红色常亮</td></tr>
+    <tr><td>ESP32 模组</td><td><code>wifi_firmware_update_state</code> 和 <code>wifi_fw_url</code></td><td><code>esp32_process</code> 调用模组自己的 OTA。状态大于 1 时，OCPP 的 <code>net_process</code> 暂停</td></tr>
+    <tr><td>4G 模组</td><td><code>sim_ota_flag</code> 和 <code>sim_ota_url</code></td><td>只在等待、故障或不可用，并且当前没有在发 OCPP 时，<code>SIM_Task</code> 调 <code>quectel_fota</code></td></tr>
+  </table>
+</section>
+
+<section id="log">
+  <h2>日志</h2>
+  <p>日志先写在外部 Flash 的环形区里，不是立刻上网。<code>log_record_print</code> 在状态切换、接触器动作、故障变化时追加一条，带时间戳。上电 <code>log_record_init</code> 找出最老和最新的一条，决定下次写到哪。</p>
+  <p>平台发 GetDiagnostics 之后，桩记下上传地址和时间范围。<code>ocpp_diagnostics_upload</code> 只在不充电、也不在准备、暂停、结束时，把这段日志传到平台，传完发 DiagnosticsStatusNotification。WiFi 被判离线时，上传状态清掉。</p>
+</section>
+
+<section id="param">
+  <h2>参数怎么保护</h2>
+  <p>运行参数 <code>sys_param</code> 放在内部 Flash，不放在外部 W25Q。扇区 120 里有 3 块，每块 2 KB。每块开头是魔数 <code>0xAA552772</code> 和递增的序号，末尾是 CRC16。上电 <code>ParamBlock_init</code> 挑序号最大且 CRC 正确的那块。主区没有合格块时，改读扇区 121 的备份。</p>
+  <p>要写的时候先 <code>sys_parm_check_all</code>。检查失败就不写，并且把内存里的参数从 Flash 重新读回来。恢复出厂会清配置，但把序列号和桩号留住。</p>
+  <p>累计电量不在这套参数块里。它在外部 Flash 上用两个扇区轮流写，每条 8 字节，带世代号和 CRC-8。回绕时先写备份扇区再写主扇区，掉电后用世代号判断哪份是完整的。敏感字段 <code>sec_param</code> 存在参数里时是 AES 加密的。</p>
+</section>
+
+<section id="extra">
+  <h2>上面没单列、但上网时会碰到的</h2>
+  <ul>
+    <li>两路 OCPP 可以同时在线。管理平台那路在主控升级占用 TLS 时会先被拆掉。</li>
+    <li>当前接口决定哪路串口中断优先级更高：走 WiFi 时抬高 USART2，走 4G 时抬高 UART4，走有线时两路都放低。蓝牙连上会临时把 WiFi 串口抬高。</li>
+    <li>App 读到的网络状态是一个字节：高 3 位是当前接口，bit4 表示三条里任意一条 TCP 已连上，低 3 位分别表示有线、4G、WiFi 是否异常。</li>
+  </ul>
+</section>
+</main>
+</body>
+</html>
