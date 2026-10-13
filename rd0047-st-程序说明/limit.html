@@ -28,6 +28,16 @@
   <p>DLB 是多台桩共用一路电时，主机用 RS485 给这台桩的 <code>dlb_current</code>。它在裁剪的最后生效，比它大的电流会被裁掉。裁完不到 6 A，PWM 电流写成 0。</p>
   <p>充电计划有效时得到 <code>sc_maxcurrent</code>。太阳能没开，输出起点就是这个计划电流。太阳能也开着，起点是计划电流和 <code>solar_current</code> 里较大的那个。然后再被 <code>dlm_current</code>、额定电流、枪线 PP、温度降档收小，小于 6 A 写成 0，记进 <code>demand_current</code>。最后再和 <code>dlb_current</code> 取小，仍小于 6 A 就写成 0，这才是 <code>pwm_current</code>。</p>
 
+  <h3 id="priority">谁先算、谁最后封顶</h3>
+  <p>DLB 是最后一道上限，前面算出再大也不能超过 <code>dlb_current</code>。充电计划并不排在太阳能上面，太阳能也不是最低的那一道。顺序是：</p>
+  <ol>
+    <li>先定起点。计划和太阳能都有效，取 <code>sc_maxcurrent</code> 和 <code>solar_current</code> 里较大的那个。只有计划，起点就是计划电流。只有太阳能，起点就是 <code>solar_current</code>。两个都没有，起点是额定电流。</li>
+    <li>然后只能往下收：家庭负载 <code>dlm_current</code>、额定电流、枪线 PP、温度降档。这一步谁小用谁。</li>
+    <li>小于 6 A 写成 0，记成 <code>demand_current</code>。</li>
+    <li>最后再和 <code>dlb_current</code> 取小。还是小于 6 A，再写成 0，这才送给 PWM。</li>
+  </ol>
+  <p>计划限 10 A、太阳能想充 16 A 时，起点是 16 A。计划不会把剩电砍成 10 A。家庭负载、额定电流和 DLB 仍可以把 16 A 压下去。DLB 只给 6 A，最终就是 6 A。</p>
+
   <h3>solar_current_from_grid</h3>
   <p>这是存在参数里的配置，单位是安培，不是电表或逆变器测出来的。出厂默认 0。允许的值是 0，或者 6 A 到桩的额定电流。小于 6 A 又不是 0，检查不通过。</p>
   <p>三个入口改完会写入参数：OCPP 键 <code>SolarCurrentFromGrid</code>，网页项 <code>solarcurrent</code>，蓝牙太阳能设置里的 <code>current</code>。蓝牙先打保存标志，断开时 <code>APP_Save_Config</code> 才写 Flash。调试串口命令 <code>solar_current_from_grid</code> 只改内存，那个分支没有调用参数保存。</p>
