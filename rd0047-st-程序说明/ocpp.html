@@ -232,8 +232,12 @@
   <p>BootNotification 刚被接受时，<code>ocpp_check_message_triggle</code> 调用 <code>transaction_record_number</code>。条数是 0，<code>offline_transaction_exist</code> 清 0，之后进准备就直接把 <code>CurrentSendMsg</code> 设成 StartTransaction。条数不是 0，这个标志置 1，进入补发。</p>
   <p>补发时同一函数读队列最前面一条的类型，并设置 <code>CurrentSendMsg</code>：类型 1 是 StartTransaction，类型 3 是 MeterValues，类型 2 是 StopTransaction。Boot、状态、心跳、DataTransfer、Authorize、固件、诊断、安全事件这些还占着发送位时，要等它们发完，当前没有在等应答，才轮到这条离线记录。</p>
   <p>下一拍 <code>ocpp_local_send_call_message</code> 按 <code>CurrentSendMsg</code> 调用对应的 <code>Call_OCPP_*</code>。因为 <code>offline_transaction_exist</code> 是 1，报文里的时间、电量、原因从 <code>transaction_record_get</code> 读出的那条记录来，不用眼前的充电状态。组完 JSON 后 <code>Send_SameCode</code> 发出去，并把 <code>CurrentSendMsg</code> 改成等待应答。</p>
-  <p>平台应答到来，开始、电量、结束三个接收函数看见仍在补发，就调用 <code>transaction_record_dec</code>，读指针加 1，这条算发完。StartTransaction 的应答即使 JSON 解不开，补发中也会丢掉这一条。队列里读到的类型对不上，<code>offline_transaction_exist</code> 清 0，才恢复进准备直接发。</p>
-  <p>补发还没完，又来一笔新充电，新的开始、电量和结束也写到队列末尾，排在旧记录后面。平台在 StartTransaction 应答里给的事务号由 <code>transactionId_store</code> 单独写在 Flash。后面的 StopTransaction 用 <code>transactionId_init</code> 读回的这个号。开始那条一直没得到应答时，结束报文里的事务号就还是 Flash 里的旧值。</p>
+  <h3 id="replayconf">补发时服务器的确认怎么处理</h3>
+  <p>确认还是会收到。补发中它的作用是「服务器收到了，可以发下一条」。三条都把超时计数清掉，再调用 <code>transaction_record_dec</code> 丢掉队头。授权缓存、因拒绝而停充、光伏 DataTransfer，补发里都不做。</p>
+  <p><code>RecvCall_OCPP_StartTransaction</code> 会解 JSON。解得开，把里面的 <code>transactionId</code> 写入 <code>charge_handle.transactionId</code>，再 <code>transactionId_store</code> 存进 Flash，后面的结束报文用这个号。解不开，事务号写成 -1，这条记录照样丢掉。两种情况都在这里返回，不再看 <code>idTagInfo</code>。服务器回的是拒绝，补发中也不会把 <code>on_charging</code> 清掉。</p>
+  <p><code>RecvCall_OCPP_StopTransaction</code> 看到仍在补发，清超时、丢掉这条记录就返回，JSON 都不解。确认里的 <code>idTagInfo</code> 不会写入授权缓存。</p>
+  <p><code>RecvCall_OCPP_MeterValues</code> 同样不解内容。清超时、丢掉这条记录就返回，也不会因为这条确认再发光伏电量。</p>
+  <p>队列里读到的类型对不上，<code>offline_transaction_exist</code> 清 0，才恢复进准备直接发。补发还没完，又来一笔新充电，新的开始、电量和结束也写到队列末尾，排在旧记录后面。开始那条一直没得到应答时，结束报文里的事务号就还是 Flash 里的旧值，解不开时则是 -1。</p>
 
   <h3>话发出去了，平台没回</h3>
   <p>StartTransaction、MeterValues 或 StopTransaction 已经发出，超时次数到 3，或者网络检查失败。当时还没在补发的话，把这条没收到应答的按同样格式写进 Flash，然后断开。已经在补发时不再写，避免同一条记两次。重连并且 Boot 被接受后，从这条开始按上面的顺序补发。</p>
