@@ -39,6 +39,16 @@
   </ol>
   <p>计划限 10 A、太阳能想充 16 A，并且计划有效、太阳能模式不是 0，第一步 <code>MAX</code> 得到 16。计划不会把 16 砍成 10。若后面的家庭负载和额定电流都不少于 16，而 <code>dlb_current</code> 是 6，第四步把 16 收成 6。6 不小于 6，不会再写成 0，PWM 按 6 A 发波。DLB 给的是 5 A 或更小，第二次小于 6 A 的判断会写成 0，CP 改成常高。</p>
 
+  <h3 id="source">四个电流分别从哪来</h3>
+  <p>家庭负载、太阳能、充电计划、DLB 是四条独立来源。关掉的那一路写成额定电流，等于不限制。汇合点只有 <code>Core/APP/Charging_Task.c</code> 的 <code>set_current_proc</code>（约 1468 行）。</p>
+  <table>
+    <tr><th>结果</th><th>谁写的</th><th>数从哪来</th></tr>
+    <tr><td><code>dlm_current</code></td><td><code>Core/APP/Smart_Charge_Handle.c</code> 的 <code>dlm_process</code>，约 293 行，每 100 ms</td><td><code>power_distribution_enable</code> 为 0 时，约 301 行写成额定电流。打开后用 <code>home_power_current - 2</code> 再减 <code>house_other_cur</code>。其他电器电流是进户钳 <code>GridHomeCurr</code> 减去桩自己的充电电流，在 <code>Core/DEV/ADC_Handle.c</code> 的 <code>ADC_Sampling_Result</code> 里算。Clamps 为 4 时，钳的数由 <code>udp_recv_ct_value</code> 从 HEMS 的 UDP 填进 <code>GridHomeCurr</code></td></tr>
+    <tr><td><code>solar_current</code></td><td>同文件 <code>solar_charging_process</code>，约 167 行，每 100 ms</td><td><code>solar_mode</code> 为 0 时，约 182 行写成额定电流。打开后先取 <code>excess_solar_power</code>：<code>ADC_Handle.c</code> 约 597 行和 629 行用充电电流减进户钳电流再乘电压；Clamps 为 4 时，<code>Smart_Charge_Handle.c</code> 约 1484 行和 1517 行改用 UDP 的 <code>solar_power</code>。约 186 行起把功率换成安培。<code>solar_current_from_grid</code> 为 0 就只用这个安培数，大于 0 则没剩电用补的电流、有剩电相加。稳住 <code>solar_stable_time</code> 后约 233 行、256 行写入 <code>solar_current</code></td></tr>
+    <tr><td><code>sc_maxcurrent</code></td><td>同文件里算计划的那段，约 955 到 977 行，每 500 ms</td><td>平台用 <code>OCPP_Handle.c</code> 的 <code>RecvCall_OCPP_SetChargingProfile</code>（约 3085 行）或 <code>RecvCall_OCPP_RemoteStartTransaction</code>（约 2745 行带的 TxProfile）写进计划存储。整桩上限和这次订单的 TxProfile（没有就用 TxDefaultProfile）取较小值，约 977 行。一种都没生效，约 971 行把 <code>sc_profile_valid</code> 清 0，<code>set_current_proc</code> 不用这个数</td></tr>
+    <tr><td><code>dlb_current</code></td><td><code>Core/APP/energy_meter.c</code> 的 <code>RS485_slave_process</code>，约 583 行</td><td><code>dlb_mode</code> 为 0，或 <code>bcd3_state == 1</code>（拨码 3 选外置电表）时，约 593 行写成额定电流。模式 1 时，主机 RS485 报文里的电流写进来：减小马上减，加大在 <code>dlb_current_ctrl</code>（约 697 行）里、正在充电时每 5 秒加 1 A。60 秒没有报文收到 6 A</td></tr>
+  </table>
+
   <h3>solar_current_from_grid</h3>
   <p>这是存在参数里的配置，单位是安培，不是电表或逆变器测出来的。出厂默认 0。允许的值是 0，或者 6 A 到桩的额定电流。小于 6 A 又不是 0，检查不通过。</p>
   <p>三个入口改完会写入参数：OCPP 键 <code>SolarCurrentFromGrid</code>，网页项 <code>solarcurrent</code>，蓝牙太阳能设置里的 <code>current</code>。蓝牙先打保存标志，断开时 <code>APP_Save_Config</code> 才写 Flash。调试串口命令 <code>solar_current_from_grid</code> 只改内存，那个分支没有调用参数保存。</p>
