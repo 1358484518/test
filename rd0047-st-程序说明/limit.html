@@ -40,7 +40,23 @@
   <p>计划限 10 A、太阳能想充 16 A，并且计划有效、太阳能模式不是 0，第一步 <code>MAX</code> 得到 16。计划不会把 16 砍成 10。若后面的家庭负载和额定电流都不少于 16，而 <code>dlb_current</code> 是 6，第四步把 16 收成 6。6 不小于 6，不会再写成 0，PWM 按 6 A 发波。DLB 给的是 5 A 或更小，第二次小于 6 A 的判断会写成 0，CP 改成常高。</p>
 
   <h3 id="source">四个电流分别从哪来</h3>
-  <p>家庭负载、太阳能、充电计划、DLB 是四条独立来源。关掉的那一路写成额定电流，等于不限制。汇合点只有 <code>Core/APP/Charging_Task.c</code> 的 <code>set_current_proc</code>（约 1468 行）。</p>
+  <p>家庭负载、太阳能、充电计划、DLB 是四件不同的事。太阳能和家庭负载有时共用同一路进户数据，所以容易看成一条。DLB 和充电计划不读这路数据。</p>
+  <table>
+    <tr><th></th><th>谁提供</th><th>走哪条线</th><th>得到什么</th></tr>
+    <tr><td>DLB</td><td>外面的主机</td><td>RS485，<code>energy_meter.c</code> 的 <code>RS485_slave_process</code></td><td><code>dlb_current</code>，最后一道上限</td></tr>
+    <tr><td>充电计划</td><td>OCPP 平台</td><td>WebSocket。<code>SetChargingProfile</code>，或远程启动里的 TxProfile</td><td><code>sc_maxcurrent</code>。和太阳能同时有效时取较大的那个</td></tr>
+    <tr><td>太阳能</td><td>桩看进户，或 HEMS</td><td>Clamps 小于 4：板上进户钳，<code>ADC_Handle.c</code>。等于 4：UDP 里的 <code>solar_power</code></td><td><code>solar_current</code>，想按剩电充多少</td></tr>
+    <tr><td>家庭负载</td><td>同一路进户数据</td><td>小于 4：板上进户钳。等于 4：同一包 UDP 里的 <code>current</code>，不是另一条 UDP</td><td><code>dlm_current</code>，家里总开关还剩多少</td></tr>
+  </table>
+  <p>Clamps（<code>sampling_methord</code>）只决定太阳能和家庭负载的进户数据从哪读。小于 4 时，太阳能用充电电流减钳电流再乘电压；家庭负载用钳电流减充电电流，得到其他电器的电流。等于 4 时仍是一包 JSON：太阳能只拿 <code>solar_power</code>，家庭负载只拿 <code>current</code>。</p>
+  <p>各自还有开关。关掉就不看上面的数，写成额定电流，或计划那一路干脆不用：</p>
+  <ul>
+    <li><code>dlb_mode</code> 为 0，或拨码 3 选外置电表（<code>bcd3_state == 1</code>）：不收 RS485，<code>dlb_current</code> 写成额定电流。</li>
+    <li>没有生效的充电计划：<code>sc_profile_valid</code> 为 0，<code>set_current_proc</code> 不用 <code>sc_maxcurrent</code>。</li>
+    <li><code>solar_mode</code> 为 0：<code>solar_current</code> 写成额定电流。</li>
+    <li><code>power_distribution_enable</code> 为 0：<code>dlm_current</code> 写成额定电流。打开之后才是入户允许电流减 2 A，再减其他电器电流。</li>
+  </ul>
+  <p>汇合点只有 <code>Core/APP/Charging_Task.c</code> 的 <code>set_current_proc</code>（约 1468 行）：计划和太阳能先取较大的当起点，再被家庭负载收小，DLB 最后封顶。</p>
   <table>
     <tr><th>结果</th><th>谁写的</th><th>数从哪来</th></tr>
     <tr><td><code>dlm_current</code></td><td><code>Core/APP/Smart_Charge_Handle.c</code> 的 <code>dlm_process</code>，约 293 行，每 100 ms</td><td><code>power_distribution_enable</code> 为 0 时，约 301 行写成额定电流。打开后用 <code>home_power_current - 2</code> 再减 <code>house_other_cur</code>。其他电器电流是进户钳 <code>GridHomeCurr</code> 减去桩自己的充电电流，在 <code>Core/DEV/ADC_Handle.c</code> 的 <code>ADC_Sampling_Result</code> 里算。Clamps 为 4 时，钳的数由 <code>udp_recv_ct_value</code> 从 HEMS 的 UDP 填进 <code>GridHomeCurr</code></td></tr>
