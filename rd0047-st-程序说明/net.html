@@ -131,7 +131,75 @@
   <h2>参数怎么保护</h2>
   <p>运行参数 <code>sys_param</code> 放在内部 Flash，不放在外部 W25Q。扇区 120 里有 3 块，每块 2 KB。每块开头是魔数 <code>0xAA552772</code> 和递增的序号，末尾是 CRC16。上电 <code>ParamBlock_init</code> 挑序号最大且 CRC 正确的那块。主区没有合格块时，改读扇区 121 的备份。</p>
   <p>要写的时候先 <code>sys_parm_check_all</code>。检查失败就不写，并且把内存里的参数从 Flash 重新读回来。恢复出厂会清配置，但把序列号和桩号留住。</p>
-  <p>累计电量不在这套参数块里。它在外部 Flash 上用两个扇区轮流写，每条 8 字节，带世代号和 CRC-8。回绕时先写备份扇区再写主扇区，掉电后用世代号判断哪份是完整的。敏感字段 <code>sec_param</code> 存在参数里时是 AES 加密的。</p>
+  <p>累计电量不在这套参数块里。它在外部 Flash 上用两个扇区轮流写，每条 8 字节，带世代号和 CRC-8。回绕时先写备份扇区再写主扇区，掉电后用世代号判断哪份是完整的。敏感字段 <code>sec_param</code> 存在另一块，内容是 AES 加密的：OCPP 登录密钥、蓝牙密码、管理平台密钥。</p>
+  <p><code>sys_param_set_to_default</code> 先把整份结构清 0，再填下面这些出厂值。没有单独赋值的字段，出厂就是 0。上电 <code>check_config_info</code> 还会把越界的项拉回默认，例如充电模式不是 1 到 3、额定电流小于 6 A、家庭电流大于 120 A。</p>
+  <h3>身份和网络</h3>
+  <table>
+    <tr><th>字段</th><th>是什么</th><th>出厂</th></tr>
+    <tr><td><code>sn</code>、<code>chargerID</code></td><td>序列号和桩号。桩号一开始抄序列号。BootNotification 里桩号放 chargePointSerialNumber，序列号放 chargeBoxSerialNumber</td><td><code>DEFAULT_INDENTIFIER</code></td></tr>
+    <tr><td><code>uniqueID</code></td><td>芯片唯一号的一段</td><td>读 MCU UID</td></tr>
+    <tr><td><code>serverurl</code></td><td>运营平台 WebSocket 地址。改它先放内存，Reset 被接受才落盘</td><td><code>DEFAULT_SERVER_URL</code></td></tr>
+    <tr><td><code>ocpp_admin_mode</code>、<code>ocpp_admin_url</code></td><td>管理平台是否打开，以及它的地址</td><td>关，地址用 <code>DEFAULT_ADMIN_URL</code></td></tr>
+    <tr><td><code>ipaddress</code>、<code>gateway</code>、<code>subMask</code>、<code>chargerDNS</code>、<code>macAddress</code>、<code>dhcp_enable</code></td><td>有线静态地址。DHCP 为 0 表示用静态地址</td><td>宏里的默认地址，DHCP 关</td></tr>
+    <tr><td><code>WIFIssid</code>、<code>WIFIkey</code></td><td>WiFi 名和密码</td><td>默认 SSID。密码全 0xFF 时上电改成 12345678</td></tr>
+    <tr><td><code>sim_APN</code>、<code>sim_account</code>、<code>sim_password</code></td><td>4G 的 APN、账号、密码</td><td>默认 APN，账号 user，密码 pass</td></tr>
+    <tr><td><code>net_interfaces_enable</code></td><td>允许哪几条上网。位表示有线、WiFi、4G</td><td><code>DEFAULT_NET_INTFACES</code>，当前工程是 WiFi</td></tr>
+  </table>
+  <h3>充电和保护</h3>
+  <table>
+    <tr><th>字段</th><th>是什么</th><th>出厂</th></tr>
+    <tr><td><code>chargemode</code></td><td>1 是 App 加刷卡并接受远程启动。2 在刷卡逻辑里是本地卡。3 是即插即充。平台把模式写成 2 时，保存前会改成 3</td><td><code>DEFAULT_CHARGE_MODE</code>，当前是 3</td></tr>
+    <tr><td><code>rated_current</code></td><td>额定电流，安培。小于 6 A 或大于机型上限会被拉回机型额定值</td><td>机型额定电流</td></tr>
+    <tr><td><code>max_temperature</code>、<code>power_reduction_temperature</code></td><td>过温保护温度，以及开始降功率的温度</td><td>106 ℃，降功率温度用 <code>DOWNPOWERTEMPERTURE</code></td></tr>
+    <tr><td><code>upper_limit_protection_voltage</code>、<code>lower_limit_protection_voltage</code></td><td>过压、欠压门限</td><td>过压默认 262</td></tr>
+    <tr><td><code>protection_disable</code></td><td>按位关掉某些保护。bit0 为 1 时，准备阶段不做二极管检测，直接当成通过</td><td><code>0x27000001</code></td></tr>
+    <tr><td><code>power_supply_mode</code>、<code>power_supply_mode_flag</code></td><td>供电制式。0 是自动，1 是 IT</td><td>自动，标志 0x27</td></tr>
+    <tr><td><code>ocpp_availability</code></td><td>桩是否可用。ChangeAvailability 会改它</td><td>1，可用</td></tr>
+    <tr><td><code>idtag_num</code>、<code>idtag[10][21]</code>、<code>ocpp_free_idtag</code></td><td>本地绑定卡，最多 10 张。免费卡号给即插即充和离线自动启动</td><td>绑定卡 0 张，免费卡号是 <code>ChargingPointFreeIdTag</code></td></tr>
+    <tr><td><code>light</code>、<code>ocpp_LightIntensity</code></td><td>灯的亮度。OCPP 的 LightIntensity 改的是 <code>light</code></td><td>都是 100</td></tr>
+    <tr><td><code>rfid_power</code>、<code>main_led</code></td><td>读卡供电、板载灯。ChangeConfiguration 能改，但那两个分支没有置保存标志</td><td>0</td></tr>
+    <tr><td><code>elock_version</code></td><td>电子锁版本</td><td>2</td></tr>
+    <tr><td><code>OPDD_enable</code>、<code>Tamper_Enalbe</code></td><td>开盖检测相关开关，防拆。键名就是 TamperEnalbe 这个拼写</td><td>都是 1</td></tr>
+    <tr><td><code>PNCIndicatorValue</code></td><td>即插即充指示</td><td>1</td></tr>
+    <tr><td><code>parking_space_enable</code></td><td>车位检测</td><td>0</td></tr>
+    <tr><td><code>dip_level</code></td><td>拨码缓存。bit0、bit1、bit2 对应三只拨码为低</td><td>按当时拨码</td></tr>
+    <tr><td><code>time_zone</code>、<code>unixtime</code></td><td>时区，单位分钟。OCPP 写入时先把小时数乘 60。unixtime 是参数里的时间戳</td><td>时区 0，时间戳是 2019-01-01</td></tr>
+  </table>
+  <h3>家庭负载、太阳能、DLB</h3>
+  <table>
+    <tr><th>字段</th><th>是什么</th><th>出厂</th></tr>
+    <tr><td><code>power_distribution_enable</code></td><td>家庭负载开关。0 时 <code>dlm_current</code> 保持额定电流</td><td>0</td></tr>
+    <tr><td><code>home_power_current</code></td><td>入户允许电流。计算时再减 2 A</td><td>100</td></tr>
+    <tr><td><code>sampling_methord</code></td><td>Clamps。0 到 3 用板上进户钳，4 收 HEMS 的 UDP。新打开太阳能时还要求它等于 4</td><td>0</td></tr>
+    <tr><td><code>power_meter_type</code>、<code>power_meter_addr</code>、<code>meter_address</code>、<code>meter_baudrate</code></td><td>外接电表类型、地址和波特率</td><td>类型 0，地址 1，波特率 9600</td></tr>
+    <tr><td><code>solar_mode</code></td><td>0 关。非 0 就按剩余光伏算 <code>solar_current</code>。新写入只接受 0 和 1，还要充电模式是 1 或 3、动态负载已开、Clamps 为 4</td><td>0</td></tr>
+    <tr><td><code>solar_current_from_grid</code></td><td>没剩电时从电网补的电流。0 或 6 A 到额定电流</td><td>0</td></tr>
+    <tr><td><code>solar_stable_time</code></td><td>光伏电流升降要稳住的秒数</td><td>10</td></tr>
+    <tr><td><code>dlb_mode</code>、<code>dlb_id</code>、<code>dlb_num</code></td><td>DLB 从站模式、RS485 地址、从站数量。模式 0 不跑从站</td><td>都是 0</td></tr>
+    <tr><td><code>ocpp_GetCTClampValue</code>、<code>ocpp_GetCTClampInterval</code></td><td>是否向平台上报钳位，以及间隔秒数。值为 2 时，报完入户钳再接着报光伏钳</td><td>0，间隔 30 秒</td></tr>
+    <tr><td><code>ct_clamps_value_broadcast_interval</code> 和两个端口</td><td>电流互感器 UDP 的间隔和本地、远端端口</td><td>5 秒，端口都是 10000</td></tr>
+    <tr><td><code>ocpp_GridCurrentInterval</code></td><td>入户电流上报间隔</td><td>0</td></tr>
+    <tr><td><code>ocpp_OfflineChargingTime</code></td><td>Boot 没被接受之后，再过这么多分钟可以自己授权。0 表示不做</td><td>0</td></tr>
+  </table>
+  <h3>OCPP 行为</h3>
+  <table>
+    <tr><th>字段</th><th>是什么</th><th>出厂</th></tr>
+    <tr><td><code>ocpp_HeartbeatInterval</code></td><td>心跳秒数。Boot 接受时，平台给的间隔不小于 20 秒才覆盖</td><td>300</td></tr>
+    <tr><td><code>ocpp_WebSocketPingInterval</code></td><td>WebSocket ping 秒数</td><td>0</td></tr>
+    <tr><td><code>ocpp_MeterValueSampleInterval</code></td><td>电量采样秒数。0 表示不发周期 MeterValues</td><td>60</td></tr>
+    <tr><td><code>ocpp_MeterValuesSampledData</code></td><td>采哪些量。电量、功率、承诺电流、电流、电压、温度默认开，入户电流默认关</td><td>见上</td></tr>
+    <tr><td><code>ocpp_ConnectionTimeOut</code></td><td>已授权但还没插枪时，等多久取消授权，单位秒</td><td>90</td></tr>
+    <tr><td><code>ocpp_LocalAuthorizeOffline</code>、<code>ocpp_LocalPreAuthorize</code>、<code>ocpp_LocalAuthListEnabled</code></td><td>离线本地授权、在线时是否先用本地授权、本地名单开关</td><td>都是 1</td></tr>
+    <tr><td><code>ocpp_AuthorizationCacheEnabled</code>、<code>ocpp_AllowOfflineTxForUnknownId</code></td><td>授权缓存、未知卡是否允许离线交易</td><td>都是 0</td></tr>
+    <tr><td><code>ocpp_StopTransactionOnInvalidId</code>、<code>ocpp_MaxEnergyOnInvalidId</code></td><td>无效卡是否停止，以及无效卡最多允许多少电量</td><td>停止为 1，电量 2000</td></tr>
+    <tr><td><code>ocpp_StopTransactionOnEVSideDisconnect</code>、<code>ocpp_UnlockConnectorOnEVSideDisconnect</code></td><td>车端断开是否结束交易、是否解锁。前一个在 GetConfiguration 里固定回 true</td><td>都是 1</td></tr>
+    <tr><td><code>ocpp_TransactionMessageAttempts</code>、<code>ocpp_TransactionMessageRetryInterval</code></td><td>交易报文重试次数和间隔。GetConfiguration 点名时分别固定回 3 和 15，和这里的出厂 10 秒不是同一处</td><td>3 次，10 秒</td></tr>
+    <tr><td><code>ocpp_ConnectorPhaseRotation</code></td><td>相序。0 和 1 报 NotApplicable、Unknown，2 起是 RST、RTS 等</td><td>0</td></tr>
+    <tr><td><code>ocpp_ResetRetries</code></td><td>复位重试次数。点名读取时固定回 3</td><td>1</td></tr>
+    <tr><td><code>fw_update_state</code></td><td>参数里的升级状态。真正升级过程看的是 <code>fw_update_ctx.state</code></td><td>0</td></tr>
+  </table>
+  <h3>校准和没在出厂函数里单独填的</h3>
+  <p>整份结构先被清 0。三相电压、电流校准系数和 <code>charging_sampling_methord</code> 没有再赋值，所以出厂是 0。总的电压、电流校准系数被写成 1.0，功率校准系数是 0.985。<code>meter_energy</code> 出厂是 0，运行中的累计电量存在外部 Flash，不靠这个字段。<code>sec_section</code> 是 128 字节的加密参数区，配合 <code>sec_version</code> 和 <code>sec_length</code>。</p>
 </section>
 
 <section id="extra">
